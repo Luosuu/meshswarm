@@ -244,6 +244,48 @@ The tests use a scripted model and cover:
 - truncated replies (output limit) are flagged to the agent instead of silently dropping the tool call
 - an end-to-end CLI run against a local fake OpenAI-compatible server
 
+## Generations: meshevolve
+
+`meshevolve` wraps meshswarm without changing it. It runs a task for several generations and lets
+swarms learn how to organize from the ones before them:
+
+1. Each generation runs `--population` swarms on the same task with plain `run_mesh`.
+2. A judge scores each `FINAL.md` from 0 to 10. It sees the task, an optional `--rubric` and the
+   deliverable, never the lessons or how the swarm worked.
+3. A reviewer reads every run's score, organization numbers and a condensed timeline from
+   `events.jsonl` (best run first), then rewrites a short set of lessons about how the agents worked together.
+4. The next generation gets those lessons appended to its goal, labelled as notes it may follow, adapt or ignore.
+
+```bash
+python -m meshevolve @task.md --generations 4 --population 3 --control --agents 3 \
+  --base-url https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1 \
+  --model thinkingmachines/Inkling-2-Small --api-key-file ../.tinker_api_key --max-cost 0.10
+```
+
+The output folder (default `runs/evolve-<timestamp>/`) holds:
+
+| Path | What |
+|---|---|
+| `summary.md` | every run's score, cost and shape, and each generation's mean score with and without lessons |
+| `lessons.md` | the latest lessons. Pass it to a later run with `--lessons @lessons.md` |
+| `gen-NN/lessons_in.md`, `lessons_out.md` | what that generation was given, and what the review wrote after it |
+| `gen-NN/scores.json` | grades and shape numbers per run |
+| `gen-NN/run-K/` | an ordinary meshswarm workspace |
+
+Flags worth knowing:
+- `--control` adds one swarm per generation that gets no lessons. Without it, a rising score can't be
+  told apart from run-to-run noise.
+- `--reviewer-model` (and `--reviewer-base-url`) uses a different model for the judge and the review.
+- `--max-cost`, `--max-tokens` and `--timeout` apply to each swarm, so a run costs up to
+  generations × (population + control) × the budget, plus the judge and reviewer calls.
+- `--parallel` runs a generation's swarms at the same time.
+
+From Python, `evolve(task, model, grade=my_scorer, ...)` replaces the LLM judge with your own function
+`(RunResult) -> Grade`, for tasks that can be checked exactly.
+
+Only single-team runs are supported. The shape numbers (`peer_messages`, `talking_pairs`, `hub_share`,
+`delegations`, `spawned_peers`, ...) describe what emerged; nothing steers the swarms toward a shape.
+
 ## Research directions
 
 - Swap the seed roles, agent count and model per agent, and compare `report.md` and `events.jsonl` across runs.

@@ -13,4 +13,4 @@ dependencies = []  # standard library only
 meshswarm = "meshswarm.cli:main"
 
 [tool.setuptools]
-packages = ["meshswarm"]
+packages = ["meshswarm", "meshevolve"]
