@@ -35,7 +35,7 @@ return clean tool calls. Model names are case-sensitive.
 python -m meshswarm "your goal" --agents researcher,writer,critic \
   --base-url https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1 \
   --model thinkingmachines/Inkling-2-Small \
-  --api-key-file ../.tinker_api_key --max-cost 0.10
+  --api-key-file .tinker_api_key --max-cost 0.10
 ```
 
 `--api-key-file` reads a bare key or `NAME=key`, so the key never appears on the command line.
@@ -92,7 +92,7 @@ Several teams can collaborate, each with its own swarm:
 ```bash
 python -m meshswarm --teams examples/spec_and_guide.json \
   --base-url https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1 \
-  --model thinkingmachines/Inkling-2-Small --api-key-file ../.tinker_api_key
+  --model thinkingmachines/Inkling-2-Small --api-key-file .tinker_api_key
 ```
 
 Each team has:
@@ -259,7 +259,7 @@ swarms learn how to organize from the ones before them:
 ```bash
 python -m meshevolve @task.md --generations 4 --population 3 --control --agents 3 \
   --base-url https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1 \
-  --model thinkingmachines/Inkling-2-Small --api-key-file ../.tinker_api_key --max-cost 0.10
+  --model thinkingmachines/Inkling-2-Small --api-key-file .tinker_api_key --max-cost 0.10
 ```
 
 The output folder (default `runs/evolve-<timestamp>/`) holds:
