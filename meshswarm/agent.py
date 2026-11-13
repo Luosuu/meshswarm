@@ -11,7 +11,7 @@ import asyncio
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
-from .model import estimate_tokens
+from .model import ContextOverflow, estimate_tokens
 from .pricing import Usage
 from .tools import execute, specs_for
 from .world import MESH, RunStopped
@@ -29,8 +29,9 @@ How the mesh works:
 Working norms:
 - Check the board and the roster before starting. Claim a task before working on it, so work is not duplicated.
 - Before posting tasks, read the board again: a peer may have just posted the same plan. Build on their plan instead of posting your own.
-- Split big work into tasks on the board; let others claim them. Spawn a new agent only when there is real parallel work nobody can take.
-- For bulky, self-contained jobs (reading and summarizing many files, drafting a section, checking a draft), delegate() to a private sub-agent and collect() its short report. That keeps your own context small. Peers (spawn_agent) share ongoing work with everyone; sub-agents do one job and report only to you.
+- Split big work into tasks on the board; let others claim them.
+- You are free to grow the team. When a problem is hard or has more than one plausible approach, create new peers (spawn_agent) or private sub-agents (delegate) to explore different directions at the same time, each with clear instructions on the direction it should take. Do this whenever you judge it useful; you do not need anyone's permission.
+- Peers (spawn_agent) join the mesh as equals and share ongoing work with everyone. Sub-agents (delegate) do one job with a fresh context and report only to you through collect(); they also keep bulky work (reading many files, drafting, checking) out of your own context.
 - Message a specific agent when you need something from them or have something they need. Keep messages short; put long content in files and send the path.
 - Record results: complete_task with a short result, and write substantial output to files.
 - Only a task's owner can complete it. If you agreed that someone else will finish a task you hold, hand it over with handover_task.
@@ -236,8 +237,16 @@ class MeshAgent:
                 self.status = "stopped"
                 world.log.emit("budget", self.name, reason=f"step limit {lim.max_steps_per_agent}")
                 return
-            await self._maybe_compact()
-            msg = await world.call_model(self, self._messages(), specs_for(self))
+            try:
+                await self._maybe_compact()
+                msg = await world.call_model(self, self._messages(), specs_for(self))
+            except ContextOverflow:
+                # Too long even to summarize: drop the oldest part and carry on, instead of losing the agent.
+                dropped = self._drop_oldest()
+                world.log.emit("context_trim", self.name, dropped=dropped)
+                if not dropped:
+                    raise
+                continue
             self.steps += 1
             if msg.pop("truncated", False):
                 # A cut-off reply usually carries a half-written tool call that could not be parsed.
@@ -299,6 +308,18 @@ class MeshAgent:
 
     def _messages(self) -> list[dict[str, Any]]:
         return [{"role": "system", "content": self.system_prompt()}, *self.history]
+
+    def _drop_oldest(self) -> int:
+        """Keep roughly the newest half of the history, starting at a message that can open a conversation."""
+        start = len(self.history) // 2
+        while start < len(self.history) and self.history[start]["role"] == "tool":
+            start += 1
+        if start == 0 or start >= len(self.history):
+            return 0
+        note = (f"[message from {MESH}]: Your earlier context was too long and its oldest part was dropped without "
+                "a summary. Re-read the board and the files you need before continuing.")
+        self.history = [{"role": "user", "content": note}, *self.history[start:]]
+        return start
 
     async def _maybe_compact(self) -> None:
         if estimate_tokens(self.history) < self.world.limits.compact_at_tokens:

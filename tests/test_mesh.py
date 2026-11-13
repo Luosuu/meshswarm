@@ -335,5 +335,27 @@ class SharedState(unittest.TestCase):
         asyncio.run(go())
 
 
+class ContextTrim(unittest.TestCase):
+    def test_agent_survives_a_context_overflow_by_dropping_old_history(self):
+        from meshswarm.model import ContextOverflow
+
+        state = {"raised": False}
+
+        def policy(agent, msgs):
+            n = step(msgs)
+            if n == 3 and not state["raised"]:
+                state["raised"] = True
+                raise ContextOverflow("too long")
+            if state["raised"]:
+                return [call("write_file", path="FINAL.md", content="ok"), call("wait")][0 if not any(
+                    m["role"] == "tool" and "FINAL.md" in m["content"] for m in msgs) else 1]
+            return call("write_file", path=f"note{n}.txt", content="x")
+
+        r, model = run("x", policy, agents=1, limits=Limits(timeout_s=10, nudges=0))
+        self.assertEqual(r.final, "ok")
+        self.assertEqual(r.agents[0]["status"], "idle")
+        self.assertTrue(any("oldest part was dropped" in str(m.get("content")) for _, ms in model.calls for m in ms))
+
+
 if __name__ == "__main__":
     unittest.main()

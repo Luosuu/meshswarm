@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import ssl
 import urllib.error
 import urllib.request
@@ -28,6 +29,13 @@ def estimate_tokens(obj: Any) -> int:
     return len(json.dumps(obj, ensure_ascii=False, default=str)) // 4
 
 
+class ContextOverflow(RuntimeError):
+    """The conversation no longer fits the model's context window, even with a minimal reply."""
+
+
+MIN_REPLY_TOKENS = 1024
+
+
 class ChatEndpoint:
     def __init__(
         self,
@@ -39,6 +47,7 @@ class ChatEndpoint:
         timeout_s: float = 300,
         retries: int = 4,
         ca_file: str | None = None,
+        context_window: int | None = None,
     ):
         self.url = base_url.rstrip("/") + "/chat/completions"
         self.model = model
@@ -47,6 +56,9 @@ class ChatEndpoint:
         self.extra_body = extra_body or {}
         self.timeout_s = timeout_s
         self.retries = retries
+        # Total tokens the model accepts (prompt + reply). When set, the reply allowance (max_tokens in
+        # extra_body) is shrunk per request so that prompt + reply fits, instead of the server refusing it.
+        self.context_window = context_window
         self.ssl = ssl.create_default_context(cafile=ca_file) if ca_file else None
 
     async def complete(self, messages: list[dict], tools: list[dict] | None, *, agent: str) -> tuple[dict, Usage]:
@@ -55,7 +67,19 @@ class ChatEndpoint:
             body["tools"] = tools  # parallel_tool_calls is deliberately not sent; many servers reject it
         if self.temperature is not None:
             body["temperature"] = self.temperature
-        data = await self._post_with_retries(body)
+        self._fit_reply(body, messages, tools)
+        try:
+            data = await self._post_with_retries(body)
+        except RuntimeError as e:
+            # The size estimate was too low: use the server's own count and try once more.
+            real = re.search(r"(\d+) prompt tokens", str(e))
+            if not (self.context_window and "context window" in str(e) and real and "max_tokens" in body):
+                raise
+            room = self.context_window - int(real.group(1)) - 64
+            if room < MIN_REPLY_TOKENS:
+                raise ContextOverflow(str(e)) from None
+            body["max_tokens"] = room
+            data = await self._post_with_retries(body)
         choice = data["choices"][0]["message"]
         msg: dict[str, Any] = {"role": "assistant", "content": choice.get("content") or ""}
         if data["choices"][0].get("finish_reason") == "length":
@@ -74,6 +98,15 @@ class ChatEndpoint:
                 for i, c in enumerate(calls)
             ]
         return msg, parse_usage(data.get("usage"), messages, msg)
+
+    def _fit_reply(self, body: dict, messages: list[dict], tools: list[dict] | None) -> None:
+        if not self.context_window or "max_tokens" not in body:
+            return
+        # The character-based estimate runs low on symbol-heavy text, so pad it.
+        prompt = int((estimate_tokens(messages) + estimate_tokens(tools or [])) * 1.25) + 256
+        room = self.context_window - prompt
+        if room < body["max_tokens"]:
+            body["max_tokens"] = max(room, MIN_REPLY_TOKENS)
 
     async def _post_with_retries(self, body: dict) -> dict:
         delay = 1.0

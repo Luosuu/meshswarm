@@ -212,7 +212,8 @@ waiting for its turn to end ("steering").
 - Workspace: `list_files`, `read_file`, `write_file`. The file tools return exact word and character counts,
   so agents can check limits instead of estimating them.
 - Pacing: `wait(reason)` sleeps until a message arrives.
-- Growth: `spawn_agent` creates a new peer, not a subordinate.
+- Growth: `spawn_agent` creates a new peer, not a subordinate. Agents are told they may add peers or sub-agents
+  whenever they judge it useful, in particular to explore different directions on a hard problem in parallel.
 
 **Stopping without a leader.** When every agent is idle and no message is in flight, the mesh has
 gone quiet. If tasks are still open at that point, everyone gets one nudge listing them. If the mesh
@@ -256,6 +257,10 @@ swarms learn how to organize from the ones before them:
    `events.jsonl` (best run first), then rewrites a short set of lessons about how the agents worked together.
 4. The next generation gets those lessons appended to its goal, labelled as notes it may follow, adapt or ignore.
 
+Lessons are meant for a type of problem, not one problem. The reviewer is told to keep them general: no
+names, numbers, statements or solution steps from the task at hand, so they still apply to a different
+problem of the same kind. `--kind "formal proofs in Lean 4"` names that type.
+
 ```bash
 python -m meshevolve @task.md --generations 4 --population 3 --control --agents 3 \
   --base-url https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1 \
@@ -285,6 +290,26 @@ From Python, `evolve(task, model, grade=my_scorer, ...)` replaces the LLM judge 
 
 Only single-team runs are supported. The shape numbers (`peer_messages`, `talking_pairs`, `hub_share`,
 `delegations`, `spawned_peers`, ...) describe what emerged; nothing steers the swarms toward a shape.
+
+## Your own tools, and Lean proofs
+
+`run_mesh(..., tools=[ExtraTool(...)])` gives every agent and sub-agent extra tools; none are added by
+default. `meshswarm.lean` builds on that: `lean_tool(LeanChecker(...))` is a `lean_check(path)` tool that
+compiles a workspace file with a fixed header (imports and shared definitions) in front and returns the
+compiler's messages with the author's own line numbers. Files containing commands that run code at
+compile time are refused, and `lean` should be a command that runs inside a container.
+
+[examples/circle2](examples/circle2) is a complete setup: tasks from prove2.me's circle-packing mission
+(`task.py` n=2, `task3.py` n=3, `task_multi.py` n=2..5), an exact grader that scores each theorem by
+checking its statement and axioms, `run.py` to drive meshevolve, and `rivanna/` scripts for a Slurm
+cluster with Apptainer. `python examples/circle2/run.py --selftest` checks the Lean setup and the grader
+without calling a model.
+
+**Context window.** `ChatEndpoint(..., context_window=65536)` shrinks each request's reply allowance so
+that prompt plus reply fits the model's window, and retries with the server's own token count if it is
+still refused. Set `Limits.compact_at_tokens` well below the window (about half) so agents summarize
+themselves in time. An agent whose conversation is too long even to summarize drops its oldest half and
+carries on. Without this, a request that does not fit is refused and the agent stops.
 
 ## Research directions
 

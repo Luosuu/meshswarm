@@ -81,6 +81,15 @@ class Evolve(unittest.TestCase):
         self.assertFalse(r.generations[0].runs[0].had_lessons)
         self.assertTrue(r.generations[1].runs[0].had_lessons)
 
+    def test_lessons_are_asked_to_be_general_for_a_kind_of_problem(self):
+        s = Scripted()
+        run_evolve(s, generations=2, population=1, kind="short writing tasks")
+        system = next(m[0]["content"] for a, m in s.model.calls if a == "reviewer")
+        self.assertIn("The lessons are for short writing tasks, not for this one task", system)
+        self.assertIn("Keep the lessons general", system)
+        self.assertIn("Notes from earlier swarms that worked on short writing tasks", s.goals[1])
+        self.assertIn("not about this particular goal", s.goals[1])
+
     def test_judge_sees_the_task_and_deliverable_but_not_the_lessons(self):
         s = Scripted()
         run_evolve(s, generations=2, population=1, rubric="Must be short.")
@@ -127,6 +136,8 @@ class Evolve(unittest.TestCase):
         self.assertNotIn("Lesson 1", s.goals[2])
         self.assertFalse(r.generations[1].runs[1].had_lessons)
         self.assertIn("NOT given any lessons", s.reviewed[1])
+        r = run_evolve(Scripted(), generations=2, population=1, control=2)
+        self.assertEqual([x.label for x in r.generations[1].runs], ["run-1", "control-1", "control-2"])
 
     def test_custom_grader_replaces_the_judge(self):
         s = Scripted()

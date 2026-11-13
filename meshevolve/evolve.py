@@ -20,6 +20,7 @@ from typing import Any, Awaitable, Callable
 from meshswarm import Limits, RunResult, run_mesh
 from meshswarm.model import Model
 from meshswarm.pricing import Pricing, Usage
+from meshswarm.tools import ExtraTool
 
 from .digest import load_events, shape, timeline
 
@@ -75,7 +76,13 @@ and can delegate to private sub-agents. Nobody told them how to organize.
 Write about HOW the agents worked together (who talked to whom, how work was split, claimed, checked and \
 assembled, what was wasted), never about the subject matter of the task.
 
+The lessons are for {kind}, not for this one task. The next swarm may get a different problem of that \
+kind, so every lesson must still make sense there.
+
 Rules:
+- Keep the lessons general. Do not mention this task's particular objects, names, numbers, statements, \
+file contents or solution steps, and do not give away any part of its answer. Where a run suggests \
+something task-specific, state the general habit behind it or leave it out.
 - Ground every lesson in what the runs below show. Runs are listed best first; weigh that, and say when \
 the evidence is one run only.
 - Keep what earlier lessons still hold, drop or correct what these runs contradict.
@@ -86,14 +93,17 @@ experiments, so later generations keep exploring.
 - Address the agents directly. Stay under {max_words} words. Reply with the lessons only, in Markdown."""
 
 LESSONS_HEADER = (
-    "\n\n---\nNotes from earlier swarms that attempted this goal (generation {n}). They describe what happened "
-    "to work or fail before. They are not rules: follow, adapt or ignore them, and try something different "
+    "\n\n---\nNotes from earlier swarms that worked on {kind} (generation {n}). They are about how to work "
+    "together, not about this particular goal, and describe what happened to work or fail before. They are not rules: follow, adapt or ignore them, and try something different "
     "if you see a better way.\n\n"
 )
 
 
-def with_lessons(task: str, lessons: str, generation: int) -> str:
-    return task if not lessons.strip() else task + LESSONS_HEADER.format(n=generation) + lessons.strip()
+DEFAULT_KIND = "tasks of the same kind as this one"
+
+
+def with_lessons(task: str, lessons: str, generation: int, kind: str = DEFAULT_KIND) -> str:
+    return task if not lessons.strip() else task + LESSONS_HEADER.format(n=generation, kind=kind) + lessons.strip()
 
 
 def parse_grade(text: str) -> Grade:
@@ -118,8 +128,9 @@ def _fmt(value: Any) -> str:
 class _Reviewer:
     """Judge and reviewer calls, with their token usage kept apart from the swarms'."""
 
-    def __init__(self, model: Model, rubric: str, max_words: int, final_chars: int):
+    def __init__(self, model: Model, rubric: str, max_words: int, final_chars: int, kind: str = DEFAULT_KIND):
         self.model = model
+        self.kind = kind
         self.rubric = rubric
         self.max_words = max_words
         self.final_chars = final_chars
@@ -154,7 +165,7 @@ class _Reviewer:
                 f"Messages between agents: {json.dumps(r.shape['message_pairs']) if r.shape['message_pairs'] else 'none'}\n\n"
                 f"What happened:\n{digests[r.label] or '(no coordination events)'}"
             )
-        reply = await self._ask(REVIEW_SYSTEM.format(max_words=self.max_words), "\n\n".join(parts), "reviewer")
+        reply = await self._ask(REVIEW_SYSTEM.format(max_words=self.max_words, kind=self.kind), "\n\n".join(parts), "reviewer")
         if not reply:
             return lessons  # a blank review must not wipe what earlier generations learned
         words = reply.split(" ")
@@ -169,7 +180,7 @@ async def evolve(
     reviewer: Model | None = None,
     generations: int = 3,
     population: int = 2,
-    control: bool = False,
+    control: bool | int = False,
     agents: int | list[str] = 3,
     out: str | Path = "evolve-run",
     limits: Limits | None = None,
@@ -177,24 +188,31 @@ async def evolve(
     grade: Grader | None = None,
     rubric: str = "",
     lessons: str = "",
+    kind: str = DEFAULT_KIND,
     max_lesson_words: int = 400,
     parallel: bool = False,
     echo: bool = False,
+    tools: list[ExtraTool] | None = None,
+    deliverable: str = "FINAL.md",
     on_generation: Callable[[Generation], None] | None = None,
 ) -> EvolveResult:
     """Run `generations` rounds of `population` swarms on `task`, reviewing after each round.
 
     reviewer: model for the judge and the review (default: the swarm's model).
-    control:  add one swarm per generation that gets no lessons, to tell learning from noise.
+    control:  swarms per generation that get no lessons (True = 1), to tell learning from noise.
     grade:    your own scorer `(RunResult) -> Grade` (may be async), replacing the LLM judge.
     lessons:  starting lessons, e.g. from an earlier evolve run.
+    kind:     the type of problem the lessons should serve, e.g. "formal proofs in Lean 4". Lessons are
+              written to carry over to other problems of that kind, not to fit this one task.
     parallel: run a generation's swarms at the same time (each has its own concurrency limit).
+    tools:    extra tools for every agent, passed to run_mesh (e.g. meshswarm.lean.lean_tool).
+    deliverable: the workspace file that counts as the result (the judge reads FINAL.md).
     """
     if generations < 1 or population < 1:
         raise ValueError("generations and population must be at least 1")
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    rev = _Reviewer(reviewer or model, rubric, max_lesson_words, final_chars=24_000)
+    rev = _Reviewer(reviewer or model, rubric, max_lesson_words, final_chars=24_000, kind=kind)
     done: list[Generation] = []
 
     for g in range(1, generations + 1):
@@ -203,11 +221,12 @@ async def evolve(
         (gen_dir / "lessons_in.md").write_text(lessons, encoding="utf-8")
         plan = [(f"run-{i + 1}", True) for i in range(population)]
         if control and lessons.strip():
-            plan.append(("control", False))
+            n = int(control)
+            plan += [("control" if n == 1 else f"control-{i + 1}", False) for i in range(n)]
 
         async def one(label: str, use_lessons: bool) -> tuple[RunRecord, str]:
-            goal = with_lessons(task, lessons, g - 1) if use_lessons else task
-            result = await run_mesh(goal, model, agents=agents, workspace=gen_dir / label, echo=echo, pricing=pricing,
+            goal = with_lessons(task, lessons, g - 1, kind) if use_lessons else task
+            result = await run_mesh(goal, model, agents=agents, workspace=gen_dir / label, echo=echo, pricing=pricing, tools=tools,
                                     limits=dataclasses.replace(limits) if limits else None)
             if grade is not None:
                 got = grade(result)
@@ -216,7 +235,7 @@ async def evolve(
                 verdict = await rev.judge(task, result)
             events = load_events(result.workspace)
             record = RunRecord(g, label, use_lessons and bool(lessons.strip()), result.workspace, verdict,
-                               shape(events), result.final is not None)
+                               shape(events), (result.workspace / deliverable).is_file())
             return record, timeline(events)
 
         if parallel:

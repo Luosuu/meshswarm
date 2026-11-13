@@ -5,3 +5,4 @@ __pycache__/
 # Local secrets
 .tinker_api_key
 *.egg-info/
+.env

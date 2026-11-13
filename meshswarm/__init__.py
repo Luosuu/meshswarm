@@ -2,6 +2,7 @@
 
 from .model import ChatEndpoint, ScriptedModel, call, say
 from .runner import RunResult, run_mesh
+from .tools import ExtraTool
 from .world import Limits, World
 
-__all__ = ["ChatEndpoint", "Limits", "RunResult", "ScriptedModel", "World", "call", "run_mesh", "say"]
+__all__ = ["ChatEndpoint", "ExtraTool", "Limits", "RunResult", "ScriptedModel", "World", "call", "run_mesh", "say"]

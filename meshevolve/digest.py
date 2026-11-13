@@ -53,6 +53,8 @@ def shape(events: list[dict[str, Any]]) -> dict[str, Any]:
         "handovers": kinds.get("task_handover", 0),
         "delegations": kinds.get("delegate", 0),
         "waits": kinds.get("wait", 0),
+        "lean_checks": kinds.get("lean_check", 0),
+        "lean_checks_ok": sum(1 for e in events if e["kind"] == "lean_check" and e.get("ok") and not e.get("uses_sorry")),
         "errors": kinds.get("error", 0),
         "seconds": round(stop["t"]) if stop else None,
         "stop": stop["reason"].split(":")[0].split(" (")[0] if stop else "?",
@@ -90,6 +92,9 @@ def _line(e: dict[str, Any], clip: int) -> str | None:
         return f"{who} delegated to {e['child']}: {_clip(e['task'], clip)}"
     if kind == "report":
         return f"{who} reported to {e.get('parent')}: {_clip(e.get('result', ''), clip)}"
+    if kind == "lean_check":
+        verdict = "errors" if not e.get("ok") else "compiles with sorry" if e.get("uses_sorry") else "complete"
+        return f"{who} checked {e['path']}: {verdict}"
     if kind == "file_write":
         return f"{who} wrote {e['path']} ({e['chars']} chars{', append' if e.get('append') else ''})"
     if kind in ("error", "budget", "wrap_up", "team_halt", "stop", "compact", "poll_stop"):

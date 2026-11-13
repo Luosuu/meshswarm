@@ -103,6 +103,7 @@ class World:
     log: EventLog = field(default_factory=EventLog)
     pricing: Pricing | None = None
     comm: str = "liaisons"  # cross-team message rule: open | liaisons | exchange
+    extra_tools: list = field(default_factory=list)  # tools.ExtraTool: added to every agent's tools
 
     def __post_init__(self) -> None:
         if self.comm not in COMM_RULES:

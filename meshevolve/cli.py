@@ -33,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--agents", default="3", help="starting agents per swarm: a number, or comma-separated roles")
     p.add_argument("--out", help="output folder (default: runs/evolve-<timestamp>)")
     p.add_argument("--lessons", help="starting lessons, or @file (e.g. lessons.md from an earlier run)")
+    p.add_argument("--kind", help='the type of problem the lessons should serve, e.g. "literature surveys"; '
+                   "lessons are kept general so they carry over to other problems of that kind")
     p.add_argument("--rubric", help="what the judge should look for, or @file")
     p.add_argument("--max-lesson-words", type=int, default=400)
     p.add_argument("--parallel", action="store_true", help="run a generation's swarms at the same time")
@@ -96,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = asyncio.run(evolve(
             task, model, reviewer=reviewer, generations=a.generations, population=a.population, control=a.control,
-            agents=_agents_arg(a.agents), out=out, limits=limits, pricing=pricing, rubric=rubric, lessons=lessons,
+            agents=_agents_arg(a.agents), out=out, limits=limits, pricing=pricing, rubric=rubric, lessons=lessons, **({"kind": a.kind} if a.kind else {}),
             max_lesson_words=a.max_lesson_words, parallel=a.parallel, echo=a.verbose, on_generation=progress))
     except KeyboardInterrupt:
         print("\ninterrupted (finished generations are kept)", file=sys.stderr)

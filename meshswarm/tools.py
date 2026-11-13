@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from .world import EXCHANGE
@@ -91,7 +92,8 @@ SPECS: list[dict] = [
     _fn(
         "spawn_agent",
         "Create a new peer agent on your team with its own context. It starts with your instructions as its first "
-        "message and joins as an equal; it does not report to you unless asked.",
+        "message and joins as an equal; it does not report to you unless asked. Use it freely, for example to "
+        "have someone pursue a different approach in parallel.",
         {"name": S, "role": S, "instructions": S},
         ["name", "role", "instructions"],
     ),
@@ -101,7 +103,8 @@ DELEGATE = _fn(
     "delegate",
     "Hand a self-contained job to a private sub-agent of yours. It gets a fresh context, your task text and file "
     "access, but cannot see the board or other agents; it works only for you and reports back a short result "
-    "(long output goes in files). Use it to keep bulky work (reading, drafting, checking) out of your own context. "
+    "(long output goes in files). Use it to explore a direction or an alternative approach in parallel, or to "
+    "keep bulky work (reading, drafting, checking) out of your own context. "
     "By default it runs in the background: keep working and call collect() for the result, or you get a message "
     "when it reports. wait=true blocks and returns the result directly. Pass the name of an existing sub-agent to "
     "give it a follow-up task with its context intact.",
@@ -128,10 +131,29 @@ SUB_SPECS_WITH_DELEGATE = SUB_SPECS + [DELEGATE, COLLECT]
 SPECS = SPECS + [DELEGATE, COLLECT]
 
 
+@dataclass
+class ExtraTool:
+    """A tool supplied by whoever starts the run (`run_mesh(..., tools=[...])`), given to every agent
+    and sub-agent. `handler(agent, **args)` is async and returns JSON-serializable data; raise
+    ValueError, PermissionError or OSError to return an error to the model."""
+
+    name: str
+    description: str
+    handler: Callable[..., Awaitable[Any]]
+    properties: dict[str, Any] = field(default_factory=dict)
+    required: list[str] = field(default_factory=list)
+
+    def spec(self) -> dict:
+        return _fn(self.name, self.description, self.properties, self.required)
+
+
 def specs_for(agent: "MeshAgent") -> list[dict]:
     if not agent.parent:
-        return SPECS
-    return SUB_SPECS_WITH_DELEGATE if agent.depth < agent.world.limits.max_depth else SUB_SPECS
+        base = SPECS
+    else:
+        base = SUB_SPECS_WITH_DELEGATE if agent.depth < agent.world.limits.max_depth else SUB_SPECS
+    extra = agent.world.extra_tools
+    return base + [t.spec() for t in extra] if extra else base
 
 
 def _ok(obj: Any) -> str:
@@ -357,9 +379,19 @@ HANDLERS: dict[str, Callable[..., Awaitable[Any]]] = {
 }
 
 
+def check_extra_tools(tools: list[ExtraTool]) -> list[ExtraTool]:
+    names = [t.name for t in tools]
+    clash = sorted(set(names) & set(HANDLERS)) or sorted({n for n in names if names.count(n) > 1})
+    if clash:
+        raise ValueError(f"extra tool names clash with existing tools: {clash}")
+    return list(tools)
+
+
 async def execute(agent: "MeshAgent", name: str, raw_args: str) -> str:
     allowed = {s["function"]["name"] for s in specs_for(agent)}
     handler = HANDLERS.get(name) if name in allowed else None
+    if handler is None and name in allowed:
+        handler = next(t.handler for t in agent.world.extra_tools if t.name == name)
     if handler is None:
         return _ok({"error": f"unknown tool {name!r}; available: {sorted(allowed)}"})
     try:

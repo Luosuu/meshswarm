@@ -77,5 +77,49 @@ class DollarBudget(unittest.TestCase):
         self.assertIn("--max-cost needs prices", err.getvalue())
 
 
+class ContextWindow(unittest.TestCase):
+    def endpoint(self, replies, **kw):
+        from meshswarm.model import ChatEndpoint
+
+        ep = ChatEndpoint("http://x/v1", "m", extra_body={"max_tokens": 32768}, context_window=65536, **kw)
+        sent = []
+
+        async def post(body):
+            sent.append(dict(body))
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        ep._post_with_retries = post
+        return ep, sent
+
+    def test_reply_allowance_shrinks_to_fit_the_window(self):
+        import asyncio
+
+        ok = {"choices": [{"message": {"content": "hi"}}]}
+        ep, sent = self.endpoint([dict(ok), dict(ok)])
+        asyncio.run(ep.complete([{"role": "user", "content": "short"}], None, agent="a"))
+        self.assertEqual(sent[0]["max_tokens"], 32768)
+        asyncio.run(ep.complete([{"role": "user", "content": "x" * 160_000}], None, agent="a"))  # about 40k tokens
+        self.assertLess(sent[1]["max_tokens"], 20_000)
+        self.assertGreaterEqual(sent[1]["max_tokens"], 1024)
+
+    def test_server_refusal_is_retried_with_the_servers_count_then_raised(self):
+        import asyncio
+
+        from meshswarm.model import ContextOverflow
+
+        refusal = "endpoint returned HTTP 400: Prompt length plus max_tokens exceeds the model's context window: {n} prompt tokens + 32768 max_tokens > 65536."
+        ok = {"choices": [{"message": {"content": "hi"}}]}
+        ep, sent = self.endpoint([RuntimeError(refusal.format(n=40000)), ok])
+        msg, _ = asyncio.run(ep.complete([{"role": "user", "content": "short"}], None, agent="a"))
+        self.assertEqual(msg["content"], "hi")
+        self.assertEqual(sent[1]["max_tokens"], 65536 - 40000 - 64)
+        ep, _ = self.endpoint([RuntimeError(refusal.format(n=65000))])
+        with self.assertRaises(ContextOverflow):
+            asyncio.run(ep.complete([{"role": "user", "content": "short"}], None, agent="a"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,7 @@ from typing import Any
 from .log import EventLog
 from .model import Model
 from .pricing import Pricing, Usage
+from .tools import ExtraTool, check_extra_tools
 from .world import EXCHANGE, MESH, SHARED_DIR, Limits, World
 
 
@@ -103,12 +104,14 @@ async def run_mesh(
     limits: Limits | None = None,
     echo: bool = True,
     pricing: Pricing | None = None,
+    tools: list[ExtraTool] | None = None,
 ) -> RunResult:
-    """Create `agents` peers (a count, or a list of roles), give them the goal, run."""
+    """Create `agents` peers (a count, or a list of roles), give them the goal, run.
+    `tools` adds your own tools (see `ExtraTool`) to every agent; none are added by default."""
     limits = limits or Limits()
     workspace = Path(workspace).resolve()
     log = EventLog(workspace / ".mesh" / "events.jsonl", echo=echo)
-    world = World(workspace, model, limits, log, pricing)
+    world = World(workspace, model, limits, log, pricing, extra_tools=check_extra_tools(tools or []))
 
     roles = [""] * agents if isinstance(agents, int) else list(agents)
     log.emit("start", MESH, goal=goal, roles=roles, limits=limits.__dict__, pricing=pricing.__dict__ if pricing else None)
@@ -144,6 +147,7 @@ async def run_teams(
     workspace: str | Path = "mesh-run",
     limits: Limits | None = None,
     echo: bool = True,
+    tools: list[ExtraTool] | None = None,
 ) -> RunResult:
     """Run several teams, each with its own goal, model, budget, board and folder.
     Teams meet on the exchange board and in shared/; `comm` sets who may message
@@ -153,7 +157,7 @@ async def run_teams(
     limits = limits or Limits()
     workspace = Path(workspace).resolve()
     log = EventLog(workspace / ".mesh" / "events.jsonl", echo=echo)
-    world = World(workspace, None, limits, log, comm=comm)
+    world = World(workspace, None, limits, log, comm=comm, extra_tools=check_extra_tools(tools or []))
     log.emit("start", MESH, shared_goal=shared_goal, comm=comm, limits=limits.__dict__,
              teams=[{"name": t.name, "goal": t.goal, "roles": _roles(t)} for t in teams])
     for spec in teams:
