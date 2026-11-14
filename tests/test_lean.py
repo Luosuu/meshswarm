@@ -249,6 +249,16 @@ class HpcKernels(unittest.TestCase):
             self.assertFalse(kernels.verification_intact(name, ws))
             self.assertIn("run_command", kernels.task_text(name, 8))
         self.assertEqual([kernels.score_of(x) for x in (1.0, 2.0, 9.48, 6.3, 100.0)], [0.0, 1.0, 4.0, 3.0, 10.0])
+        import run as hpc_run
+
+        # 16 logical processors: 8 cores with two threads each, in two memory regions of 4 cores.
+        siblings = {c: [c, c + 8] for c in range(8)} | {c + 8: [c, c + 8] for c in range(8)}
+        nodes = {0: [0, 1, 2, 3, 8, 9, 10, 11], 1: [4, 5, 6, 7, 12, 13, 14, 15]}
+        self.assertEqual(hpc_run.plan_core_sets(list(range(16)), siblings, nodes, 4, 2), [[0, 1, 2, 3], [4, 5, 6, 7]])
+        self.assertEqual(hpc_run.plan_core_sets(list(range(16)), siblings, nodes, 8, 1), [[0, 1, 2, 3, 4, 5, 6, 7]])
+        with self.assertRaises(SystemExit):
+            hpc_run.plan_core_sets(list(range(16)), siblings, nodes, 8, 2)
+        self.assertEqual(kernels.TIMED.findall("MESHTIME 9.9\nSolution validates\nMESHTIME 1.234\n")[-1], "1.234")
         ws = Path(tempfile.mkdtemp())
         (ws / "build.sh").write_text("gcc -O3 -march=native -fopenmp pic.c -o pic\n")
         self.assertIsNone(kernels.unsafe_math_flag(ws))

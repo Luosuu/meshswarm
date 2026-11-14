@@ -48,15 +48,64 @@ def starting_lessons(spec: str | None) -> str:
     return ""
 
 
+def _cpu_list(text: str) -> list[int]:
+    out: list[int] = []
+    for part in text.strip().split(","):
+        if part:
+            lo, _, hi = part.partition("-")
+            out.extend(range(int(lo), int(hi or lo) + 1))
+    return out
+
+
+def plan_core_sets(allowed: list[int], siblings: dict[int, list[int]], nodes: dict[int, list[int]],
+                   per_swarm: int, swarms: int) -> list[list[int]]:
+    """Choose `swarms` disjoint sets of `per_swarm` processors: one hardware thread per physical core,
+    and each set inside one memory region (NUMA node) when the machine allows it. Timings on two
+    threads of one core, or on cores spread over several regions, are slower and less repeatable."""
+    seen: set[int] = set()
+    cores = []
+    for c in sorted(allowed):
+        key = min(siblings.get(c, [c]))
+        if key not in seen:
+            seen.add(key)
+            cores.append(c)
+    region = {c: n for n, cpus in nodes.items() for c in cpus}
+    groups: dict[int, list[int]] = {}
+    for c in cores:
+        groups.setdefault(region.get(c, -1), []).append(c)
+    sets: list[list[int]] = []
+    leftovers: list[int] = []
+    for _, group in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        while len(group) >= per_swarm and len(sets) < swarms:
+            sets.append(group[:per_swarm])
+            group = group[per_swarm:]
+        leftovers += group
+    while len(sets) < swarms and len(leftovers) >= per_swarm:  # no single region is big enough: mix
+        sets.append(leftovers[:per_swarm])
+        leftovers = leftovers[per_swarm:]
+    if len(sets) < swarms:
+        raise SystemExit(f"need {per_swarm * swarms} physical cores for {swarms} swarms, but only {len(cores)} are available")
+    return sets
+
+
 def core_sets(per_swarm: int, swarms: int) -> list[str]:
-    """Disjoint sets of the cores this process may use, one per swarm. Empty where the OS cannot say."""
+    """Core sets for this machine, from the processors this process may use. Empty where the OS cannot say."""
     if not hasattr(os, "sched_getaffinity"):
         return []
-    cores = sorted(os.sched_getaffinity(0))
-    sets = [cores[i * per_swarm:(i + 1) * per_swarm] for i in range(swarms)]
-    if any(len(s) < per_swarm for s in sets):
-        raise SystemExit(f"need {per_swarm * swarms} cores for {swarms} swarms, but only {len(cores)} are available")
-    return [",".join(map(str, s)) for s in sets]
+    allowed = sorted(os.sched_getaffinity(0))
+    siblings, nodes = {}, {}
+    for c in allowed:
+        f = Path(f"/sys/devices/system/cpu/cpu{c}/topology/thread_siblings_list")
+        if f.is_file():
+            siblings[c] = _cpu_list(f.read_text())
+    for d in Path("/sys/devices/system/node").glob("node[0-9]*"):
+        nodes[int(d.name[4:])] = _cpu_list((d / "cpulist").read_text())
+    sets = plan_core_sets(allowed, siblings, nodes, per_swarm, swarms)
+    region = {c: n for n, cpus in nodes.items() for c in cpus}
+    for i, chosen in enumerate(sets):
+        regions = sorted({region.get(c, -1) for c in chosen})
+        print(f"core set {i + 1}: {chosen} (memory region{'s' if len(regions) > 1 else ''} {regions})", flush=True)
+    return [",".join(map(str, chosen)) for chosen in sets]
 
 
 OMP_PROBE = """#include <omp.h>

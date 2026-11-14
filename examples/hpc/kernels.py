@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import math
 import re
+import statistics
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,7 @@ KERNELS: dict[str, dict[str, Any]] = {
         "flags": "-DDOUBLE=1 -DRADIUS=2 -DSTAR=1 -DLOOPGEN=0 -DVERBOSE=0 -DRESTRICT_KEYWORD=0",
         "usage": "./amr <iterations> <grid size> <refinement size> <refinement level> <period> <duration> <sub-iterations>",
         "dev_args": "40 2000 400 3 10 5 4",
-        "test_args": ["60 3000 600 3 12 6 4", "80 4000 500 2 8 4 6"],
+        "test_args": ["150 3000 600 3 12 6 4", "200 4000 500 2 8 4 6"],
         "anchors": [
             "reference_norm = (DTYPE) (iterations+1) * (COEFX + COEFY);",
             "if (ABS(norm-reference_norm) > EPSILON) {",
@@ -61,7 +62,7 @@ KERNELS: dict[str, dict[str, Any]] = {
         "flags": "",
         "usage": "./pic <steps> <grid size> <particles> <k> <m> <init mode> <init parameters>",
         "dev_args": "40 1000 2000000 1 2 GEOMETRIC 0.99",
-        "test_args": ["40 1500 3000000 1 2 SINUSOIDAL", "40 1000 3000000 2 1 LINEAR 1.0 3.0"],
+        "test_args": ["100 1500 3000000 1 2 SINUSOIDAL", "100 1000 3000000 2 1 LINEAR 1.0 3.0"],
         "anchors": ["fmod(", "(iterations+1)", "epsilon", 'printf("Solution validates\\n");'],
     },
 }
@@ -101,7 +102,8 @@ the computation and its built-in verification intact: parallelize it (OpenMP is 
 loops and data, change compiler flags.
 
 How it is graded: `build.sh` is run, then `./{name}` is timed on {cores} cores with arguments you have
-not seen (other sizes and settings than the example). What is timed is the wall-clock time of the whole
+not seen: other settings than the example, and several times larger, each run five times with the
+median counting. What is timed is the wall-clock time of the whole
 program from start to exit, including allocation, initialization and verification, not the rate it
 prints: the time `run_command` reports for `./{name} ...` is the same measure. A run counts only if it prints `Solution validates`
 and the verification code is still in the source. Builds that use `-ffast-math`, `-Ofast` or
@@ -145,20 +147,30 @@ def score_of(speedup: float) -> float:
     return round(10 * sum(1 for t in THRESHOLDS if speedup >= t) / len(THRESHOLDS), 2)
 
 
-async def _best(runner: ShellRunner, command: str, workspace: Path, limit: float, repeats: int = 3) -> tuple[float | None, str]:
-    """Fastest of `repeats` runs that validate; None when a run fails or does not validate."""
-    best, last = None, ""
+TIMED = re.compile(r"MESHTIME ([0-9.]+)")
+
+
+async def _times(runner: ShellRunner, command: str, workspace: Path, limit: float, repeats: int) -> tuple[list[float] | None, str]:
+    """Wall time of each of `repeats` runs, measured by the shell inside the sandbox so that starting
+    the sandbox itself is not counted. None when a run fails, times out or does not validate."""
+    times, last = [], ""
     for _ in range(repeats):
-        r = await runner.run(command, workspace, limit)
+        r = await runner.run(f"TIMEFORMAT='MESHTIME %R'; time {command}", workspace, limit)
         last = r.output
-        if r.timed_out or r.exit_code != 0 or "Solution validates" not in r.output:
+        found = TIMED.findall(r.output)  # the shell prints its line after the program has exited: take the last
+        if r.timed_out or r.exit_code != 0 or "Solution validates" not in r.output or not found:
             return None, last
-        best = r.seconds if best is None else min(best, r.seconds)
-    return best, last
+        times.append(float(found[-1]))
+    return times, last
 
 
-def make_grader(name: str, runner: ShellRunner, repeats: int = 3, opt: str = "-O3"):
+def _spread(times: list[float]) -> str:
+    return f"{statistics.median(times):.2f}s [{min(times):.2f}-{max(times):.2f}]"
+
+
+def make_grader(name: str, runner: ShellRunner, repeats: int = 5, baseline_repeats: int = 3, opt: str = "-O3"):
     k = KERNELS[name]
+    baselines: dict[tuple[str, str | None], list[float]] = {}  # measured once per case and core set, then reused
 
     async def grade(result: RunResult) -> Grade:
         ws = Path(result.workspace)
@@ -183,15 +195,20 @@ def make_grader(name: str, runner: ShellRunner, repeats: int = 3, opt: str = "-O
             return Grade(0.0, f"build.sh failed: {clip(built.output.strip(), 300)}")
         speedups, notes = [], []
         for args in k["test_args"]:
-            t0, out0 = await _best(runner, f"./.mesh/baseline/{name} {args}", ws, 600, repeats)
-            if t0 is None:
-                return Grade(0.0, f"baseline run failed (setup problem) on `{args}`: {clip(out0, 200)}")
-            t1, out1 = await _best(runner, f"./{name} {args}", ws, max(60.0, 3 * t0), repeats)
+            key = (args, runner.cores_for(ws))
+            if key not in baselines:
+                t0, out0 = await _times(runner, f"./.mesh/baseline/{name} {args}", ws, 900, baseline_repeats)
+                if t0 is None:
+                    return Grade(0.0, f"baseline run failed (setup problem) on `{args}`: {clip(out0, 200)}")
+                baselines[key] = t0
+            t0 = baselines[key]
+            base_time = statistics.median(t0)
+            t1, out1 = await _times(runner, f"./{name} {args}", ws, max(120.0, 4 * base_time), repeats)
             if t1 is None:
                 return Grade(0.0, f"`./{name} {args}` failed, timed out or did not validate: {clip(out1.strip(), 200)}")
-            speedups.append(t0 / max(t1, 1e-6))
-            notes.append(f"{t0:.2f}s -> {t1:.2f}s")
+            speedups.append(base_time / max(statistics.median(t1), 1e-6))
+            notes.append(f"{_spread(t0)} -> {_spread(t1)}")
         speedup = math.exp(sum(math.log(s) for s in speedups) / len(speedups))
-        return Grade(score_of(speedup), f"speedup {speedup:.2f}x on held-out sizes ({'; '.join(notes)})")
+        return Grade(score_of(speedup), f"speedup {speedup:.2f}x on held-out sizes, median [min-max] of repeated runs ({'; '.join(notes)})")
 
     return grade

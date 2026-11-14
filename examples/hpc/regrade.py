@@ -35,6 +35,7 @@ async def main() -> int:
     p.add_argument("workspaces", nargs="+")
     a = p.parse_args()
     runner = ShellRunner(json.loads(os.environ.get("MESH_RUN_WRAP", '["bash", "-c"]')), core_sets=core_sets(a.cores, 1))
+    grade = kernels.make_grader(a.kernel, runner)  # one grader: the serial baseline is timed once and shared
     for src in a.workspaces:
         ws = Path(tempfile.mkdtemp(prefix="regrade-", dir=os.environ.get("MESH_RUN_SCRATCH"))) / "ws"
         shutil.copytree(src, ws, ignore=shutil.ignore_patterns(".mesh"))
@@ -50,7 +51,7 @@ async def main() -> int:
         class Result:
             workspace = ws
 
-        g = await kernels.make_grader(a.kernel, runner)(Result())
+        g = await grade(Result())
         print(f"{src} [{note}] -> score {g.score} | {g.reasons}", flush=True)
     return 0
 
