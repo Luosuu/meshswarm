@@ -155,6 +155,10 @@ def main() -> int:
                   f"checks {r.shape['lean_checks']} ({r.shape['lean_checks_ok']} complete) | {r.grade.reasons}", flush=True)
             when = {n: r.shape["progress"].get(n) for n, _ in task.TARGETS if n in r.shape["progress"]}
             print(f"    first in the deliverable (minutes): " + (", ".join(f"{n} {t // 60}" for n, t in when.items()) or "nothing"), flush=True)
+            whole = r.shape["progress"].get("(whole deliverable)")
+            goal = "goal marked complete" if "goal completed" in r.shape["stop"] else r.shape["stop"]
+            print(f"    whole deliverable sorry-free at: {'never' if whole is None else str(whole // 60) + ' min'}; "
+                  f"swarm ran {(r.shape['seconds'] or 0) // 60} min; stopped by: {goal}", flush=True)
 
     result = asyncio.run(evolve(
         task.TASK, model, generations=a.generations, population=a.population, control=a.controls, agents=a.agents,

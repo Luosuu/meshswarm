@@ -74,11 +74,15 @@ def shape(events: list[dict[str, Any]]) -> dict[str, Any]:
         "lean_checks_ok": sum(1 for e in events if e["kind"] == "lean_check" and e.get("ok") and not e.get("uses_sorry")),
         "errors": kinds.get("error", 0),
         "seconds": round(stop["t"]) if stop else None,
-        "stop": stop["reason"].split(":")[0].split(" (")[0] if stop else "?",
+        "stop": ("goal completed" if "goal completed" in stop["reason"]
+                 else stop["reason"].split(":")[0].split(" (")[0]) if stop else "?",
         "tokens": sum(e["prompt"] + e["completion"] for e in usage),
         "cost_usd": round(sum(e["cost"] for e in usage), 4) if priced else None,
         "message_pairs": {f"{a} -> {b}": n for (a, b), n in sorted(pairs.items())},
     }
+
+
+WHOLE = "(whole deliverable)"
 
 
 def first_seen(events: list[dict[str, Any]], deliverable: str) -> dict[str, int]:
@@ -89,6 +93,8 @@ def first_seen(events: list[dict[str, Any]], deliverable: str) -> dict[str, int]
         if e["kind"] == "lean_check" and e.get("path") == deliverable and e.get("ok"):
             for name in e.get("sorry_free") or []:
                 seen.setdefault(name.split(".")[-1], round(e["t"]))
+            if not e.get("uses_sorry"):
+                seen.setdefault(WHOLE, round(e["t"]))  # the whole file compiled with no sorry: really finished
     return seen
 
 
