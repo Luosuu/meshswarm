@@ -59,14 +59,34 @@ def core_sets(per_swarm: int, swarms: int) -> list[str]:
     return [",".join(map(str, s)) for s in sets]
 
 
+OMP_PROBE = """#include <omp.h>
+#include <stdio.h>
+int main(void) {
+#pragma omp parallel
+#pragma omp single
+  printf("threads %d\\n", omp_get_num_threads());
+  return 0;
+}
+"""
+
+
+async def preflight(runner: ShellRunner, cores: int) -> None:
+    """Stop before spending anything if the sandbox cannot build and run an OpenMP program on all its cores."""
+    ws = Path(tempfile.mkdtemp(prefix="hpc-preflight-", dir=os.environ.get("MESH_RUN_SCRATCH")))
+    (ws / "omp_probe.c").write_text(OMP_PROBE)
+    r = await runner.run("${CC:-gcc} -fopenmp omp_probe.c -o omp_probe && ./omp_probe", ws, 120)
+    print(f"preflight: {r.output.strip()[:200]}", flush=True)
+    if r.exit_code != 0 or f"threads {cores}" not in r.output:
+        raise SystemExit(f"sandbox preflight failed: expected an OpenMP program to report {cores} threads")
+
+
 async def selftest(name: str, runner: ShellRunner, cores: int) -> int:
     ws = Path(tempfile.mkdtemp(prefix="hpc-selftest-", dir=os.environ.get("MESH_RUN_SCRATCH")))
     for rel, text in kernels.starting_files(name).items():
         (ws / rel).write_text(text)
     print(f"workspace {ws}; cores {runner.cores_for(ws)}")
-    probe = ('printf "#include <omp.h>\\n#include <stdio.h>\\nint main(){\\n#pragma omp parallel\\n#pragma omp single\\n'
-             'printf(\\"threads %%d\\\\n\\", omp_get_num_threads());return 0;}\\n" > omp_probe.c && '
-             "${CC:-gcc} --version | head -1 && ${CC:-gcc} -fopenmp omp_probe.c -o omp_probe && ./omp_probe; nproc; "
+    (ws / "omp_probe.c").write_text(OMP_PROBE)
+    probe = ("${CC:-gcc} --version | head -1 && ${CC:-gcc} -fopenmp omp_probe.c -o omp_probe && ./omp_probe; nproc; "
              "(ping -c1 -W1 1.1.1.1 >/dev/null 2>&1 && echo network:reachable || echo network:none); ls ~ 2>&1 | head -3")
     r = await runner.run(probe, ws, 120)
     print(f"sandbox probe (exit {r.exit_code}, {r.seconds}s):\n{r.output.strip()}")
@@ -129,6 +149,8 @@ def main() -> int:
     if a.selftest:
         return asyncio.run(selftest(a.kernel, runner, a.cores))
 
+    if runner.core_sets:
+        asyncio.run(preflight(runner, a.cores))
     pricing = lookup(a.model)
     if pricing is None:
         p.error(f"no built-in prices for {a.model}")

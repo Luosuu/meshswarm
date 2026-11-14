@@ -40,7 +40,7 @@ KERNELS: dict[str, dict[str, Any]] = {
         "flags": "-DDOUBLE=1 -DRADIUS=2 -DSTAR=1 -DLOOPGEN=0 -DVERBOSE=0 -DRESTRICT_KEYWORD=0",
         "usage": "./amr <iterations> <grid size> <refinement size> <refinement level> <period> <duration> <sub-iterations>",
         "dev_args": "40 2000 400 3 10 5 4",
-        "test_args": ["60 3000 600 3 12 6 4", "40 4000 500 2 8 4 6"],
+        "test_args": ["60 3000 600 3 12 6 4", "80 4000 500 2 8 4 6"],
         "anchors": [
             "reference_norm = (DTYPE) (iterations+1) * (COEFX + COEFY);",
             "if (ABS(norm-reference_norm) > EPSILON) {",
