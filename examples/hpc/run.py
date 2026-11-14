@@ -221,7 +221,7 @@ def main() -> int:
         kernels.task_text(a.kernel, a.cores), model, generations=a.generations, population=a.population, agents=a.agents,
         out=out, limits=limits, pricing=pricing, grade=kernels.make_grader(a.kernel, runner),
         tools=[run_tool(runner, f"gcc with OpenMP is available; you have {a.cores} cores.")],
-        deliverable="build.sh", files=kernels.starting_files(a.kernel), kind=kernels.KIND, parallel=a.parallel,
+        deliverable="build.sh", protect=["build.sh", "*.c", "*.h"], files=kernels.starting_files(a.kernel), kind=kernels.KIND, parallel=a.parallel,
         lessons=starting_lessons(a.lessons), on_generation=progress))
     u = result.review_usage
     print(f"reviewer tokens: {u.prompt} in, {u.completion} out (about ${pricing.cost(u):.4f})")

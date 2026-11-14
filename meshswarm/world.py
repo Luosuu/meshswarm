@@ -86,6 +86,7 @@ class Team:
     budget_wrap: bool = False  # told to wrap up because a budget ran out
     goal_done: bool = False  # an agent completed this team's GOAL task: the team winds down
     halted: bool = False  # hard budget limit hit: the team's agents are stopped
+    kept: dict[str, bytes] = field(default_factory=dict)  # protected files as they were when the goal was completed
 
     @property
     def cost_usd(self) -> float | None:
@@ -109,6 +110,7 @@ class World:
     pricing: Pricing | None = None
     comm: str = "liaisons"  # cross-team message rule: open | liaisons | exchange
     extra_tools: list = field(default_factory=list)  # tools.ExtraTool: added to every agent's tools
+    protect: list = field(default_factory=lambda: ["FINAL.md"])  # deliverable files (glob patterns), kept as they are once the goal is completed
 
     def __post_init__(self) -> None:
         if self.comm not in COMM_RULES:
@@ -413,10 +415,13 @@ class World:
             team.goal_done = True
             return
         team.goal_done = team.wrapping_up = True
-        self.log.emit("goal_done", by, task=task.id, team=team.name or None)
+        self._keep(team)
+        self.log.emit("goal_done", by, task=task.id, team=team.name or None, kept=sorted(team.kept))
         notice = (
             f"{by} marked the goal (task #{task.id}) complete, so the work is finished. Do not start anything new and "
-            "do not re-verify what has already been checked. Finish the step you are on in at most two steps, then call wait()."
+            "do not re-verify what has already been checked. The deliverable is final and can no longer be changed"
+            + (f" ({', '.join(sorted(team.kept))})" if team.kept else "")
+            + ". Finish the step you are on in at most two steps, then call wait()."
         )
         for a in list(self.agents.values()):
             if a.team == team.name and a.status == "working" and a.name != by:
@@ -426,6 +431,38 @@ class World:
                 asyncio.get_running_loop().call_later(self.limits.goal_grace_s, self.stop, "goal completed")
             except RuntimeError:  # called outside a running loop (direct use in tests)
                 pass
+
+    def _keep(self, team: Team) -> None:
+        """Remember the protected files as they are now. A finished deliverable was once lost to a
+        teammate's half-done rewrite landing in the grace period after the goal was completed."""
+        root = team.workspace
+        for pattern in self.protect:
+            for p in sorted(root.glob(pattern)):
+                if p.is_file() and ".mesh" not in p.relative_to(root).parts:
+                    team.kept[str(p.relative_to(root))] = p.read_bytes()
+
+    def frozen(self, viewer: str, p: Path) -> bool:
+        """Is `p` a protected file of a team whose goal is completed?"""
+        for team in self.teams.values():
+            if team.kept and (p == team.workspace or team.workspace in p.parents):
+                if str(p.relative_to(team.workspace)) in team.kept:
+                    return True
+        return False
+
+    def restore_kept(self) -> None:
+        """Put back any protected file that changed after its goal was completed (a shell command can
+        still touch it). The changed version is kept beside it as `<name>.after-goal`."""
+        for team in self.teams.values():
+            for rel, data in team.kept.items():
+                p = team.workspace / rel
+                now = p.read_bytes() if p.is_file() else None
+                if now == data:
+                    continue
+                if now is not None:
+                    p.with_name(p.name + ".after-goal").write_bytes(now)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(data)
+                self.log.emit("deliverable_restored", MESH, path=rel, team=team.name or None)
 
     def tasks_posted_by_others_since(self, agent: str, seen_id: int) -> list[Task]:
         return [t for t in self.tasks.values()

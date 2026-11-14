@@ -411,6 +411,48 @@ class GoalDone(unittest.TestCase):
         self.assertIn('"goal_done"', events)
         self.assertNotIn('"checkin"', events)
 
+    def test_the_deliverable_cannot_be_changed_after_the_goal_is_completed(self):
+        def policy(agent, msgs):
+            n = step(msgs)
+            if agent == "agent-1":
+                return [call("claim_task", task_id=1), call("write_file", path="FINAL.md", content="done"),
+                        call("complete_task", task_id=1, result="FINAL.md"), call("wait")][min(n, 3)]
+            if any("marked the goal" in str(m.get("content")) for m in msgs):  # a late rewrite of finished work
+                return call("write_file", path="FINAL.md", content="broken") if n % 2 else call("write_file", path="notes.txt", content="x")
+            return call("write_file", path=f"scratch{n}.txt", content="x")
+
+        model = ScriptedModel(policy, delay_s=0.03)
+        r, _ = run("x", policy, agents=2, model=model,
+                   limits=Limits(timeout_s=10, nudges=0, goal_grace_s=0.4, max_steps_per_agent=500))
+        self.assertEqual(r.final, "done")
+        refused = [t for a, ms in model.calls if a == "agent-2" for t in tool_results(ms) if "finished deliverable" in str(t.get("error"))]
+        self.assertTrue(refused)
+        self.assertTrue((r.workspace / "notes.txt").is_file())  # other files stay writable
+
+    def test_a_protected_file_changed_behind_the_tools_is_put_back(self):
+        tmp = Path(tempfile.mkdtemp())
+
+        async def scenario():
+            w = World(tmp, ScriptedModel(lambda a, m: call("wait")), Limits(goal_grace_s=None))
+            w.protect = ["build.sh", "*.c"]
+            goal = w.post_task("mesh", "GOAL", "x")
+            w.add_agent("agent-1", "")
+            for name, text in {"build.sh": "good", "k.c": "int x;", "notes.txt": "n"}.items():
+                (tmp / name).write_text(text)
+            w.complete_task("agent-1", goal.id, "ok")
+            (tmp / "build.sh").write_text("bad")
+            (tmp / "k.c").unlink()
+            (tmp / "notes.txt").write_text("changed")
+            w.restore_kept()
+            w.stop("test over")
+            await asyncio.gather(*w._runners, return_exceptions=True)
+
+        asyncio.run(scenario())
+        self.assertEqual((tmp / "build.sh").read_text(), "good")
+        self.assertEqual((tmp / "build.sh.after-goal").read_text(), "bad")
+        self.assertEqual((tmp / "k.c").read_text(), "int x;")
+        self.assertEqual((tmp / "notes.txt").read_text(), "changed")
+
     def test_goal_done_and_everyone_idle_stops_at_once(self):
         def policy(agent, msgs):
             if agent == "agent-1":

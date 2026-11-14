@@ -274,6 +274,9 @@ async def _read_file(a: "MeshAgent", path: str, offset: int = 0) -> Any:
 
 async def _write_file(a: "MeshAgent", path: str, content: str, append: bool = False) -> Any:
     p = a.world.resolve(a.name, path)
+    if a.world.frozen(a.name, p):
+        return {"error": f"{path} is the finished deliverable: the goal is marked complete, so it can no longer be changed. "
+                         "If you believe it is wrong, tell your teammates what you found; do not rewrite it."}
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a" if append else "w", encoding="utf-8") as fh:
         fh.write(content)

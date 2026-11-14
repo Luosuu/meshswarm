@@ -323,6 +323,12 @@ carries on. Without this, a request that does not fit is refused and the agent s
 - **Goal done.** Completing the GOAL task ends the run: teammates are told to stop starting work and
   not to re-verify, and the run stops when everyone is idle or after `Limits.goal_grace_s` (default 300).
   Without this, a swarm that has finished keeps spending on verification.
+- **The deliverable is kept.** From the moment the goal is completed, the deliverable can no longer be
+  changed: `write_file` on it is refused, and a change made some other way (a shell command) is undone
+  when the run stops, with the changed version saved beside it as `<name>.after-goal`. `run_mesh(...,
+  protect=[...])` names the files (glob patterns, default `FINAL.md`); meshevolve protects its
+  `deliverable`. A swarm once lost a finished proof to a teammate's half-done rewrite landing in the
+  grace period.
 
 meshevolve now also records, per swarm, when each theorem first appeared in a compiling deliverable
 (`progress` in `scores.json`), and shows the reviewer each agent's share of time asleep and the number

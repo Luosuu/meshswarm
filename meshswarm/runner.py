@@ -91,6 +91,7 @@ async def _run(world: World, limits: Limits) -> None:
         for task in world._runners:
             task.cancel()
         await asyncio.gather(*world._runners, return_exceptions=True)
+        world.restore_kept()
 
 
 def _agent_rows(world: World) -> list[dict[str, Any]]:
@@ -117,13 +118,18 @@ async def run_mesh(
     echo: bool = True,
     pricing: Pricing | None = None,
     tools: list[ExtraTool] | None = None,
+    protect: list[str] | None = None,
 ) -> RunResult:
     """Create `agents` peers (a count, or a list of roles), give them the goal, run.
-    `tools` adds your own tools (see `ExtraTool`) to every agent; none are added by default."""
+    `tools` adds your own tools (see `ExtraTool`) to every agent; none are added by default.
+    `protect` names the deliverable files (glob patterns, default FINAL.md): once the goal task is
+    completed they can no longer be changed, so a late edit cannot spoil finished work."""
     limits = limits or Limits()
     workspace = Path(workspace).resolve()
     log = EventLog(workspace / ".mesh" / "events.jsonl", echo=echo)
     world = World(workspace, model, limits, log, pricing, extra_tools=check_extra_tools(tools or []))
+    if protect is not None:
+        world.protect = list(protect)
 
     roles = [""] * agents if isinstance(agents, int) else list(agents)
     log.emit("start", MESH, goal=goal, roles=roles, limits=limits.__dict__, pricing=pricing.__dict__ if pricing else None)

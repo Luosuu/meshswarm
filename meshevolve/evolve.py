@@ -195,6 +195,7 @@ async def evolve(
     tools: list[ExtraTool] | None = None,
     deliverable: str = "FINAL.md",
     files: dict[str, str] | None = None,
+    protect: list[str] | None = None,
     on_generation: Callable[[Generation], None] | None = None,
 ) -> EvolveResult:
     """Run `generations` rounds of `population` swarms on `task`, reviewing after each round.
@@ -209,6 +210,8 @@ async def evolve(
     tools:    extra tools for every agent, passed to run_mesh (e.g. meshswarm.lean.lean_tool).
     deliverable: the workspace file that counts as the result (the judge reads FINAL.md).
     files:    starting files written into every swarm's workspace, as {relative path: text}.
+    protect:  files (glob patterns) that can no longer be changed once a swarm completes its goal;
+              by default the deliverable.
     """
     if generations < 1 or population < 1:
         raise ValueError("generations and population must be at least 1")
@@ -233,6 +236,7 @@ async def evolve(
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(text, encoding="utf-8")
             result = await run_mesh(goal, model, agents=agents, workspace=gen_dir / label, echo=echo, pricing=pricing, tools=tools,
+                                    protect=protect if protect is not None else [deliverable],
                                     limits=dataclasses.replace(limits) if limits else None)
             if grade is not None:
                 got = grade(result)
