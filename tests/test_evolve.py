@@ -121,7 +121,7 @@ class Evolve(unittest.TestCase):
         self.assertEqual(run.shape["hub_share"], 1.0)
         self.assertEqual(run.shape["claims"], 1)
         self.assertEqual(run.shape["message_pairs"], {"agent-1 -> agent-2": 1})
-        self.assertEqual(run.shape["stop"], "quiescent")
+        self.assertEqual(run.shape["stop"], "goal completed")
         text = timeline(load_events(run.workspace))
         self.assertIn("agent-2 wrote FINAL.md", text)
         self.assertNotIn("mesh ->", text)
