@@ -194,6 +194,7 @@ async def evolve(
     echo: bool = False,
     tools: list[ExtraTool] | None = None,
     deliverable: str = "FINAL.md",
+    files: dict[str, str] | None = None,
     on_generation: Callable[[Generation], None] | None = None,
 ) -> EvolveResult:
     """Run `generations` rounds of `population` swarms on `task`, reviewing after each round.
@@ -207,6 +208,7 @@ async def evolve(
     parallel: run a generation's swarms at the same time (each has its own concurrency limit).
     tools:    extra tools for every agent, passed to run_mesh (e.g. meshswarm.lean.lean_tool).
     deliverable: the workspace file that counts as the result (the judge reads FINAL.md).
+    files:    starting files written into every swarm's workspace, as {relative path: text}.
     """
     if generations < 1 or population < 1:
         raise ValueError("generations and population must be at least 1")
@@ -226,6 +228,10 @@ async def evolve(
 
         async def one(label: str, use_lessons: bool) -> tuple[RunRecord, str]:
             goal = with_lessons(task, lessons, g - 1, kind) if use_lessons else task
+            for rel, text in (files or {}).items():
+                target = gen_dir / label / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
             result = await run_mesh(goal, model, agents=agents, workspace=gen_dir / label, echo=echo, pricing=pricing, tools=tools,
                                     limits=dataclasses.replace(limits) if limits else None)
             if grade is not None:

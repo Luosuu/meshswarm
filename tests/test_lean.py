@@ -181,5 +181,75 @@ class CircleTask(unittest.TestCase):
         self.assertIn("asleep_pct", run.shape)
 
 
+class Shell(unittest.TestCase):
+    def test_run_command_tool_runs_in_the_workspace_and_times_out(self):
+        from meshswarm.shell import ShellRunner, run_tool
+
+        def policy(agent, msgs):
+            return [call("write_file", path="hello.c", content='#include <stdio.h>\nint main(){puts("hi");return 0;}\n'),
+                    call("run_command", command="ls && echo here:$(basename $PWD) && false"),
+                    call("run_command", command="sleep 5", timeout_s=0.3), call("wait")][min(step(msgs), 3)]
+
+        model = ScriptedModel(policy)
+        ws = Path(tempfile.mkdtemp()) / "space"
+        asyncio.run(run_mesh("goal", model, agents=1, workspace=ws, echo=False, limits=Limits(timeout_s=20),
+                             tools=[run_tool(ShellRunner())]))
+        results = tool_results(model.calls[-1][1])
+        self.assertEqual(results[1]["exit_code"], 1)
+        self.assertIn("hello.c", results[1]["output"])
+        self.assertIn("here:space", results[1]["output"])
+        self.assertIsNone(results[2]["exit_code"])
+        self.assertIn("timed_out", results[2])
+        events = [json.loads(line) for line in (ws / ".mesh" / "events.jsonl").read_text().splitlines()]
+        self.assertEqual(len([e for e in events if e["kind"] == "run"]), 2)
+
+    def test_core_sets_are_assigned_per_workspace_and_output_is_clipped(self):
+        from meshswarm.shell import ShellRunner, clip
+
+        r = ShellRunner(core_sets=["0-7", "8-15"])
+        a, b = Path("/tmp/a"), Path("/tmp/b")
+        self.assertEqual([r.cores_for(a), r.cores_for(b), r.cores_for(a)], ["0-7", "8-15", "0-7"])
+        self.assertEqual(r.threads_for(a), 8)
+        self.assertEqual(ShellRunner(core_sets=["0,2,4-5"]).threads_for(a), 4)
+        text = clip("A" * 3000 + "B" * 3000, 600)
+        self.assertTrue(text.startswith("A") and text.endswith("B") and "cut" in text and len(text) < 700)
+
+    def test_evolve_seeds_starting_files(self):
+        def policy(agent, msgs):
+            if agent == "reviewer":
+                return say("ok")
+            return [call("read_file", path="src/a.txt"), call("wait")][min(step(msgs), 1)]
+
+        model = ScriptedModel(policy)
+
+        async def grade(result):
+            from meshevolve import Grade
+            return Grade(1.0, "x")
+
+        asyncio.run(evolve("t", model, generations=1, population=1, agents=1, out=tempfile.mkdtemp(),
+                           limits=Limits(timeout_s=10, nudges=0), grade=grade, files={"src/a.txt": "seeded text"}))
+        self.assertIn("seeded text", str(next(ms for a, ms in model.calls if a == "agent-1" and len(ms) > 3)))
+
+
+class HpcKernels(unittest.TestCase):
+    def test_task_files_scoring_and_tamper_check(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "hpc"))
+        import kernels
+
+        for name in ("amr", "pic"):
+            files = kernels.starting_files(name)
+            self.assertIn("build.sh", files)
+            self.assertIn(f"-o {name}", files["build.sh"])
+            ws = Path(tempfile.mkdtemp())
+            for rel, text in files.items():
+                (ws / rel).write_text(text)
+            self.assertTrue(kernels.verification_intact(name, ws))
+            src = ws / f"{name}.c"
+            src.write_text(src.read_text().replace('printf("Solution validates\\n");', 'printf("fine\\n");'))
+            self.assertFalse(kernels.verification_intact(name, ws))
+            self.assertIn("run_command", kernels.task_text(name, 8))
+        self.assertEqual([kernels.score_of(x) for x in (1.0, 1.5, 3.9, 4.0, 100.0)], [0.0, 2.0, 4.0, 6.0, 10.0])
+
+
 if __name__ == "__main__":
     unittest.main()
