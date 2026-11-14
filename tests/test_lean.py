@@ -249,6 +249,14 @@ class HpcKernels(unittest.TestCase):
             self.assertFalse(kernels.verification_intact(name, ws))
             self.assertIn("run_command", kernels.task_text(name, 8))
         self.assertEqual([kernels.score_of(x) for x in (1.0, 2.0, 9.48, 6.3, 100.0)], [0.0, 1.0, 4.0, 3.0, 10.0])
+        ws = Path(tempfile.mkdtemp())
+        (ws / "build.sh").write_text("gcc -O3 -march=native -fopenmp pic.c -o pic\n")
+        self.assertIsNone(kernels.unsafe_math_flag(ws))
+        (ws / "build.sh").write_text("gcc -O3 -ffast-math pic.c -o pic\n")
+        self.assertIn("-ffast-math in build.sh", kernels.unsafe_math_flag(ws))
+        (ws / "build.sh").write_text("gcc -O3 pic.c -o pic\n")
+        (ws / "pic.c").write_text('#pragma GCC optimize ("fast-math")\nint main(){return 0;}\n')
+        self.assertIn("pic.c", kernels.unsafe_math_flag(ws))
 
 
 if __name__ == "__main__":

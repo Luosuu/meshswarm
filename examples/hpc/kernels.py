@@ -104,7 +104,9 @@ How it is graded: `build.sh` is run, then `./{name}` is timed on {cores} cores w
 not seen (other sizes and settings than the example). What is timed is the wall-clock time of the whole
 program from start to exit, including allocation, initialization and verification, not the rate it
 prints: the time `run_command` reports for `./{name} ...` is the same measure. A run counts only if it prints `Solution validates`
-and the verification code is still in the source. The score is the speedup over a serial -O3 build of
+and the verification code is still in the source. Builds that use `-ffast-math`, `-Ofast` or
+`-ffinite-math-only` are not graded at all, because those flags can silently switch the verification
+off. The score is the speedup over a serial -O3 build of
 the original program, in rungs at {rungs}: reaching a rung earns its share, so a modest speedup is
 better than a broken build. A build that fails, or a run that does not validate, scores nothing, so
 keep `build.sh` working at all times.
@@ -121,6 +123,22 @@ def _norm(text: str) -> str:
 def verification_intact(name: str, workspace: Path) -> bool:
     source = _norm("".join(p.read_text(errors="replace") for p in sorted(workspace.glob("*.c")) + sorted(workspace.glob("*.h"))))
     return all(_norm(a) in source for a in KERNELS[name]["anchors"])
+
+
+# Flags that let the compiler assume no NaN or infinity, or reorder arithmetic freely. Under them the
+# kernels' own comparison against the reference can be optimized away, so a wrong answer still prints
+# "Solution validates" (a swarm demonstrated this on PIC). A build that uses them is not graded.
+UNSAFE_MATH = re.compile(r"-ffast-math|-Ofast|-ffinite-math-only|-funsafe-math-optimizations|-fno-signed-nans"
+                         r"|optimize\s*\(\s*\"[^\"]*(fast-math|finite-math|unsafe-math)")
+
+
+def unsafe_math_flag(workspace: Path) -> str | None:
+    for p in [workspace / "build.sh", *sorted(workspace.glob("Makefile*")), *sorted(workspace.glob("*.c")), *sorted(workspace.glob("*.h"))]:
+        if p.is_file():
+            m = UNSAFE_MATH.search(p.read_text(errors="replace"))
+            if m:
+                return f"{m.group(0)} in {p.name}"
+    return None
 
 
 def score_of(speedup: float) -> float:
@@ -148,6 +166,9 @@ def make_grader(name: str, runner: ShellRunner, repeats: int = 3, opt: str = "-O
             return Grade(0.0, "no build.sh in the workspace")
         if not verification_intact(name, ws):
             return Grade(0.0, "the kernel's verification code is no longer in the source")
+        unsafe = unsafe_math_flag(ws)
+        if unsafe:
+            return Grade(0.0, f"the build uses {unsafe}, which can switch off the kernel's own verification")
         # The serial baseline is built from the original files in a folder agents cannot write, and
         # timed with this swarm's own cores so that the two times are comparable.
         base = ws / ".mesh" / "baseline"
