@@ -101,7 +101,9 @@ the computation and its built-in verification intact: parallelize it (OpenMP is 
 loops and data, change compiler flags.
 
 How it is graded: `build.sh` is run, then `./{name}` is timed on {cores} cores with arguments you have
-not seen (other sizes and settings than the example). A run counts only if it prints `Solution validates`
+not seen (other sizes and settings than the example). What is timed is the wall-clock time of the whole
+program from start to exit, including allocation, initialization and verification, not the rate it
+prints: the time `run_command` reports for `./{name} ...` is the same measure. A run counts only if it prints `Solution validates`
 and the verification code is still in the source. The score is the speedup over a serial -O3 build of
 the original program, in rungs at {rungs}: reaching a rung earns its share, so a modest speedup is
 better than a broken build. A build that fails, or a run that does not validate, scores nothing, so
