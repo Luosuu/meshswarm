@@ -22,7 +22,7 @@ from meshswarm.model import Model
 from meshswarm.pricing import Pricing, Usage
 from meshswarm.tools import ExtraTool
 
-from .digest import load_events, shape, timeline
+from .digest import first_seen, load_events, shape, timeline
 
 
 @dataclass
@@ -156,7 +156,7 @@ class _Reviewer:
         ranked = sorted(runs, key=lambda r: (r.grade.score is None, -(r.grade.score or 0)))
         parts = [f"# Task\n\n{task}", f"# Lessons the swarms were given\n\n{lessons.strip() or '(none: first generation)'}"]
         for r in ranked:
-            s = {k: v for k, v in r.shape.items() if k != "message_pairs"}
+            s = {k: v for k, v in r.shape.items() if k not in ("message_pairs", "progress")}
             given = "given the lessons" if r.had_lessons else "NOT given any lessons"
             parts.append(
                 f"# {r.label} ({given})\n\n"
@@ -234,8 +234,10 @@ async def evolve(
             else:
                 verdict = await rev.judge(task, result)
             events = load_events(result.workspace)
+            numbers = shape(events)
+            numbers["progress"] = first_seen(events, deliverable)
             record = RunRecord(g, label, use_lessons and bool(lessons.strip()), result.workspace, verdict,
-                               shape(events), (result.workspace / deliverable).is_file())
+                               numbers, (result.workspace / deliverable).is_file())
             return record, timeline(events)
 
         if parallel:

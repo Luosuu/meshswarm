@@ -357,5 +357,69 @@ class ContextTrim(unittest.TestCase):
         self.assertTrue(any("oldest part was dropped" in str(m.get("content")) for _, ms in model.calls for m in ms))
 
 
+class CheckIn(unittest.TestCase):
+    def test_sleeping_agent_gets_a_check_in_while_a_teammate_works(self):
+        def policy(agent, msgs):
+            n = step(msgs)
+            if agent == "agent-2":
+                if any("Check-in" in str(m.get("content")) for m in msgs) and not any(
+                        m["role"] == "tool" and "helped.txt" in m["content"] for m in msgs):
+                    return call("write_file", path="helped.txt", content="x")
+                return call("wait", reason="nothing to do")
+            return call("write_file", path=f"work{n}.txt", content="x") if n < 12 else call("wait")
+
+        model = ScriptedModel(policy, delay_s=0.05)
+        r, _ = run("x", policy, agents=2, model=model, limits=Limits(timeout_s=10, nudges=0, checkin_after_s=0.2))
+        self.assertTrue((r.workspace / "helped.txt").is_file())
+        events = [json.loads(line) for line in (r.workspace / ".mesh" / "events.jsonl").read_text().splitlines()]
+        checkins = [e for e in events if e["kind"] == "checkin"]
+        self.assertTrue(checkins and all(e["agent"] == "agent-2" for e in checkins))
+        text = next(m["content"] for a, ms in model.calls if a == "agent-2" for m in ms if "Check-in" in str(m.get("content")))
+        self.assertIn("#1 GOAL", text)
+        self.assertIn("Working now: agent-1", text)
+        self.assertTrue(r.stop_reason.startswith("quiescent"), r.stop_reason)  # check-ins never keep a finished mesh alive
+
+    def test_no_check_in_when_switched_off(self):
+        def policy(agent, msgs):
+            if agent == "agent-2":
+                return call("wait")
+            return call("write_file", path=f"work{step(msgs)}.txt", content="x") if step(msgs) < 8 else call("wait")
+
+        model = ScriptedModel(policy, delay_s=0.05)
+        r, _ = run("x", policy, agents=2, model=model, limits=Limits(timeout_s=10, nudges=0, checkin_after_s=None))
+        events = (r.workspace / ".mesh" / "events.jsonl").read_text()
+        self.assertNotIn('"checkin"', events)
+
+
+class GoalDone(unittest.TestCase):
+    def test_completing_the_goal_ends_the_run_even_if_a_teammate_keeps_going(self):
+        def policy(agent, msgs):
+            n = step(msgs)
+            if agent == "agent-1":
+                return [call("claim_task", task_id=1), call("write_file", path="FINAL.md", content="done"),
+                        call("complete_task", task_id=1, result="FINAL.md"), call("wait")][min(n, 3)]
+            return call("write_file", path=f"verify{n}.txt", content="x")  # never stops by itself
+
+        model = ScriptedModel(policy, delay_s=0.03)
+        r, _ = run("x", policy, agents=2, model=model,
+                   limits=Limits(timeout_s=10, nudges=0, goal_grace_s=0.3, max_steps_per_agent=500))
+        self.assertEqual(r.stop_reason, "goal completed")
+        self.assertEqual(r.final, "done")
+        told = [m["content"] for a, ms in model.calls if a == "agent-2" for m in ms if "marked the goal" in str(m.get("content"))]
+        self.assertTrue(told and "do not re-verify" in told[0])
+        events = (r.workspace / ".mesh" / "events.jsonl").read_text()
+        self.assertIn('"goal_done"', events)
+        self.assertNotIn('"checkin"', events)
+
+    def test_goal_done_and_everyone_idle_stops_at_once(self):
+        def policy(agent, msgs):
+            if agent == "agent-1":
+                return [call("claim_task", task_id=1), call("complete_task", task_id=1, result="ok"), call("wait")][min(step(msgs), 2)]
+            return call("wait")
+
+        r, _ = run("x", policy, agents=2, limits=Limits(timeout_s=10, goal_grace_s=5))
+        self.assertEqual(r.stop_reason, "quiescent: goal completed")
+
+
 if __name__ == "__main__":
     unittest.main()

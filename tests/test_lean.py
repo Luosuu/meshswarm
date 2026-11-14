@@ -177,6 +177,8 @@ class CircleTask(unittest.TestCase):
         self.assertTrue(run.final_written)
         self.assertEqual(run.shape["lean_checks"], 1)
         self.assertEqual(run.shape["lean_checks_ok"], 0)  # compiles, but three theorems are still sorry
+        self.assertEqual(list(run.shape["progress"]), ["two_packable"])
+        self.assertIn("asleep_pct", run.shape)
 
 
 if __name__ == "__main__":

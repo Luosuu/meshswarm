@@ -39,6 +39,20 @@ def shape(events: list[dict[str, Any]]) -> dict[str, Any]:
     usage = [e for e in events if e["kind"] == "usage"]
     priced = bool(usage) and all(e.get("cost") is not None for e in usage)
     stop = next((e for e in events if e["kind"] == "stop"), None)
+    end = events[-1]["t"] if events else 0
+    asleep: dict[str, int] = {}
+    for name in sorted({e["agent"] for e in peers}):
+        total, since = 0.0, None
+        for e in events:
+            if e["agent"] != name:
+                continue
+            if e["kind"] == "idle":
+                since = e["t"]
+            elif e["kind"] == "wake" and since is not None:
+                total, since = total + e["t"] - since, None
+        if since is not None:
+            total += end - since
+        asleep[name] = round(100 * total / end) if end else 0
     return {
         "agents": len(peers),
         "spawned_peers": sum(1 for e in peers if e.get("spawned_by")),
@@ -53,6 +67,9 @@ def shape(events: list[dict[str, Any]]) -> dict[str, Any]:
         "handovers": kinds.get("task_handover", 0),
         "delegations": kinds.get("delegate", 0),
         "waits": kinds.get("wait", 0),
+        "asleep_pct": asleep,  # share of the run each mesh agent spent asleep
+        "replies_cut_off": kinds.get("truncated", 0),  # replies that hit the output limit and were lost
+        "checkins": kinds.get("checkin", 0),
         "lean_checks": kinds.get("lean_check", 0),
         "lean_checks_ok": sum(1 for e in events if e["kind"] == "lean_check" and e.get("ok") and not e.get("uses_sorry")),
         "errors": kinds.get("error", 0),
@@ -62,6 +79,17 @@ def shape(events: list[dict[str, Any]]) -> dict[str, Any]:
         "cost_usd": round(sum(e["cost"] for e in usage), 4) if priced else None,
         "message_pairs": {f"{a} -> {b}": n for (a, b), n in sorted(pairs.items())},
     }
+
+
+def first_seen(events: list[dict[str, Any]], deliverable: str) -> dict[str, int]:
+    """Seconds at which each theorem first appeared without `sorry` in a compiling check of the
+    deliverable (needs the `sorry_free` field that lean_check events carry). Shows how fast a swarm got there."""
+    seen: dict[str, int] = {}
+    for e in events:
+        if e["kind"] == "lean_check" and e.get("path") == deliverable and e.get("ok"):
+            for name in e.get("sorry_free") or []:
+                seen.setdefault(name.split(".")[-1], round(e["t"]))
+    return seen
 
 
 def _clip(text: Any, limit: int) -> str:

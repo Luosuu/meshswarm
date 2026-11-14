@@ -125,7 +125,7 @@ class Evolve(unittest.TestCase):
         text = timeline(load_events(run.workspace))
         self.assertIn("agent-2 wrote FINAL.md", text)
         self.assertNotIn("mesh ->", text)
-        self.assertEqual(shape(load_events(run.workspace)), run.shape)
+        self.assertEqual(shape(load_events(run.workspace)), {k: v for k, v in run.shape.items() if k != "progress"})
 
     def test_control_run_gets_no_lessons(self):
         s = Scripted()

@@ -311,6 +311,28 @@ still refused. Set `Limits.compact_at_tokens` well below the window (about half)
 themselves in time. An agent whose conversation is too long even to summarize drops its oldest half and
 carries on. Without this, a request that does not fit is refused and the agent stops.
 
+## Staying busy, and stopping when done
+
+- **Self-directed work.** Agents are told to look for useful work before waiting (unclaimed or stalled
+  tasks, a second attempt at a teammate's stuck problem, finished work not yet in the deliverable),
+  to make small checked attempts on a hard problem instead of solving it in one long reply, and to put
+  each finished piece into the deliverable themselves, in small steps.
+- **Check-in.** An agent that has slept for `Limits.checkin_after_s` (default 600) while a teammate is
+  working and tasks are open is woken with a list of what is open and who is working. It decides
+  whether to act. Check-ins never keep a finished mesh alive. `None` turns them off.
+- **Goal done.** Completing the GOAL task ends the run: teammates are told to stop starting work and
+  not to re-verify, and the run stops when everyone is idle or after `Limits.goal_grace_s` (default 300).
+  Without this, a swarm that has finished keeps spending on verification.
+
+meshevolve now also records, per swarm, when each theorem first appeared in a compiling deliverable
+(`progress` in `scores.json`), and shows the reviewer each agent's share of time asleep and the number
+of replies lost to the output limit.
+
+Further tasks in [examples/circle2](examples/circle2): `task_sens.py` (twelve lemmas on Boolean
+sensitivity from another prove2.me mission) and `task_hard3.py` (one hard bound, graded as a ladder
+of increasingly strong statements). `rivanna/patterns.py` and `rivanna/hardlook.py` summarize how a
+swarm collaborated from its event log.
+
 ## Research directions
 
 - Swap the seed roles, agent count and model per agent, and compare `report.md` and `events.jsonl` across runs.

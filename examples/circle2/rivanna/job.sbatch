@@ -2,9 +2,9 @@
 #SBATCH --job-name=circle2
 #SBATCH --account=bii_dsc_community
 #SBATCH --partition=standard
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
-#SBATCH --time=10:00:00
+#SBATCH --cpus-per-task=24
+#SBATCH --mem=96G
+#SBATCH --time=09:00:00
 #SBATCH --output=/scratch/%u/meshswarm/logs/%x-%j.out
 # Usage: sbatch job.sbatch [arguments for run.py], e.g. --selftest or --generations 3 --population 2 --control
 set -euo pipefail

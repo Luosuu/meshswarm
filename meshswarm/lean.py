@@ -98,6 +98,19 @@ class LeanChecker:
         return LeanResult(ok, "sorry" in raw, raw, shown, round(time.monotonic() - start, 1), timed_out)
 
 
+DECLARATION = re.compile(r"(?m)^(?=(?:private |protected )?(?:theorem|lemma) )")
+
+
+def sorry_free(text: str) -> list[str]:
+    """Names of the theorems and lemmas in `text` whose own text has no `sorry` (a textual check)."""
+    names = []
+    for part in DECLARATION.split(text):
+        m = re.match(r"(?:private |protected )?(?:theorem|lemma) (\S+)", part)
+        if m and "sorry" not in part:
+            names.append(m.group(1))
+    return names
+
+
 def lean_tool(checker: LeanChecker, about_header: str = "") -> ExtraTool:
     """The `lean_check(path)` tool. `about_header` tells agents what is already in front of their file."""
 
@@ -110,7 +123,8 @@ def lean_tool(checker: LeanChecker, about_header: str = "") -> ExtraTool:
         if bad:
             return {"error": f"{bad.group(0).strip()!r} is not allowed in a checked file; remove it"}
         r = await checker.check(body, name=path)
-        a.world.log.emit("lean_check", a.name, path=path, ok=r.ok, uses_sorry=r.uses_sorry, seconds=r.seconds)
+        a.world.log.emit("lean_check", a.name, path=path, ok=r.ok, uses_sorry=r.uses_sorry, seconds=r.seconds,
+                         sorry_free=sorry_free(body) if r.ok else None)
         messages = r.shown.strip()
         if len(messages) > OUTPUT_LIMIT:
             messages = messages[:OUTPUT_LIMIT] + f"\n… {len(messages) - OUTPUT_LIMIT} more characters; fix the first errors first"

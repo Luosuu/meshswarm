@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -51,6 +52,8 @@ class Limits:
     max_concurrent_calls: int = 4  # protects a local endpoint
     compact_at_tokens: int = 60_000  # estimated history size that triggers compaction
     nudges: int = 1  # wake-ups when everyone is idle but tasks remain open
+    goal_grace_s: float | None = 300  # after the goal task is completed, seconds before the run is stopped outright
+    checkin_after_s: float | None = 600  # wake an agent that slept this long while others work and tasks are open
     timeout_s: float = 1800
 
 
@@ -80,6 +83,8 @@ class Team:
     liaisons: set[str] = field(default_factory=set)
     usage: Usage = field(default_factory=Usage)
     wrapping_up: bool = False
+    budget_wrap: bool = False  # told to wrap up because a budget ran out
+    goal_done: bool = False  # an agent completed this team's GOAL task: the team winds down
     halted: bool = False  # hard budget limit hit: the team's agents are stopped
 
     @property
@@ -391,10 +396,36 @@ class World:
             return {"error": f"task #{task_id} is claimed by {task.owner}; they can hand it over to you with handover_task"}
         task.status, task.owner, task.result = "done", by, result
         self.log.emit("task_done", by, task=task_id, result=result)
+        if task.title == "GOAL" and task.posted_by == MESH:
+            self._goal_done(task, by)
         if task.board == EXCHANGE and task.posted_by in self.agents and task.posted_by != by:
             # Close the loop: the requester learns its request was answered, even across teams.
             self.deliver(MESH, task.posted_by, f"Exchange task #{task_id} ({task.title}) was completed by {by}: {result}")
         return {"ok": True}
+
+    def _goal_done(self, task: Task, by: str) -> None:
+        """The goal task was completed: the team stops starting work, and once every team is done the
+        run ends, at the latest after `goal_grace_s`. Without this a finished swarm keeps finding things to do."""
+        team = self.teams.get(task.board) or self.teams[self.agents[by].team]
+        if team.goal_done or team.halted:
+            return
+        if team.budget_wrap:  # already winding down for budget; nothing more to announce
+            team.goal_done = True
+            return
+        team.goal_done = team.wrapping_up = True
+        self.log.emit("goal_done", by, task=task.id, team=team.name or None)
+        notice = (
+            f"{by} marked the goal (task #{task.id}) complete, so the work is finished. Do not start anything new and "
+            "do not re-verify what has already been checked. Finish the step you are on in at most two steps, then call wait()."
+        )
+        for a in list(self.agents.values()):
+            if a.team == team.name and a.status == "working" and a.name != by:
+                self.deliver(MESH, a.name, notice)
+        if all(t.goal_done or t.halted for t in self.teams.values()) and self.limits.goal_grace_s is not None:
+            try:
+                asyncio.get_running_loop().call_later(self.limits.goal_grace_s, self.stop, "goal completed")
+            except RuntimeError:  # called outside a running loop (direct use in tests)
+                pass
 
     def tasks_posted_by_others_since(self, agent: str, seen_id: int) -> list[Task]:
         return [t for t in self.tasks.values()
@@ -485,7 +516,7 @@ class World:
         if fraction >= 1.25:
             self._halt(team, f"{which} hard limit reached")
         elif fraction >= 1 and not team.wrapping_up:
-            team.wrapping_up = True
+            team.wrapping_up = team.budget_wrap = True
             self.log.emit("wrap_up", MESH, budget=which, team=team.name or None)
             whose = f"Team {team.name}'s" if team.name else "The"
             notice = (
@@ -540,8 +571,40 @@ class World:
                 )
             if any(a.inbox for a in live):
                 return
-        why = "after budget wrap-up" if self.wrapping_up else "all agents idle, no messages in flight"
+        live_now = [t for t in self.teams.values() if not t.halted]
+        if live_now and all(t.goal_done and not t.budget_wrap for t in live_now):
+            why = "goal completed"
+        else:
+            why = "after budget wrap-up" if self.wrapping_up else "all agents idle, no messages in flight"
         self.stop(f"quiescent: {why}")
+
+    def check_in(self) -> None:
+        """Wake agents that have slept a long time while teammates are still working and work is
+        unfinished. The message only reports what is open; the agent decides whether to act.
+        When nobody is working, `check_quiescent` is in charge instead."""
+        after = self.limits.checkin_after_s
+        if after is None or self.done.is_set():
+            return
+        now = time.monotonic()
+        for a in list(self.agents.values()):
+            if a.parent or a.status != "idle" or a.inbox or a.idle_since is None or now - a.idle_since < after:
+                continue
+            team = self.teams[a.team]
+            if team.halted or team.wrapping_up:
+                continue
+            busy = [b.name for b in self.agents.values()
+                    if b.status == "working" and not b.parent and b.team == a.team and b is not a]
+            unfinished = [t for t in self.tasks.values() if t.status != "done" and self.can_see_task(a.name, t)]
+            if not busy or not unfinished:
+                continue
+            minutes = max(round((now - a.idle_since) / 60), 1)
+            listing = "; ".join(f"#{t.id} {t.title} ({t.status}{', ' + t.owner if t.owner else ''})" for t in unfinished[:12])
+            self.log.emit("checkin", a.name, minutes=minutes)
+            self.deliver(
+                MESH, a.name,
+                f"Check-in: you have been waiting for about {minutes} min. Not done yet: {listing}. "
+                f"Working now: {', '.join(busy)}. If you see something useful you can do, do it; if not, wait again.",
+            )
 
     def stop(self, reason: str) -> None:
         if self.done.is_set():

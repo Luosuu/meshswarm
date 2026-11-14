@@ -39,6 +39,18 @@ def read_key(path: str, name: str) -> str:
     raise ValueError(f"{name} not found in {path}")
 
 
+def starting_lessons(spec: str | None) -> str:
+    """`spec` is one file, or several separated by commas: the first that exists is used. That lets a
+    queued run prefer the lessons of the run before it and fall back if that run left none."""
+    for path in (spec or "").split(","):
+        if path.strip() and Path(path.strip()).is_file():
+            print(f"starting lessons: {path.strip()}", flush=True)
+            return Path(path.strip()).read_text()
+    if spec:
+        print("starting lessons: none of the given files exist; starting without lessons", flush=True)
+    return ""
+
+
 async def warm_up(checker: LeanChecker) -> None:
     """Load Mathlib once with a generous limit: the first import on a node with a cold file cache
     can take minutes, later ones seconds."""
@@ -56,11 +68,12 @@ async def warm_up(checker: LeanChecker) -> None:
 async def selftest(checker: LeanChecker) -> int:
     """Check that Lean runs, the header compiles, the skeleton grades 0 and a cheat is rejected."""
     r = await checker.check("example : (2 : ℝ) + 2 = 4 := by norm_num\n", name="smoke.lean")
-    print(f"header + smoke: ok={r.ok} in {r.seconds}s\n{r.shown.strip()[:1500]}")
+    print(f"header + smoke: ok={r.ok} in {r.seconds}s\n{r.shown.strip()[:6000]}")
     if not r.ok:
         return 1
     r = await checker.check(task.SKELETON, name="skeleton.lean", footer=task.footer(task.TARGETS))
-    print(f"skeleton: compiles={r.ok} uses_sorry={r.uses_sorry} proved={task.proved(r.raw, task.TARGETS)}\n{r.raw.strip()[:2500]}")
+    errors = "\n".join(ln for ln in r.shown.splitlines() if "error" in ln)[:4000]
+    print(f"skeleton: compiles={r.ok} uses_sorry={r.uses_sorry} proved={task.proved(r.raw, task.TARGETS)}\n{errors}\n{r.shown.strip()[:3000] if not r.ok else ''}")
     if not r.ok or any(task.proved(r.raw, task.TARGETS).values()):
         return 1
     first = task.TARGETS[0][0]
@@ -70,17 +83,20 @@ async def selftest(checker: LeanChecker) -> int:
     print(f"axiom cheat: proved={task.proved(r.raw, task.TARGETS)}")
     if any(task.proved(r.raw, task.TARGETS).values()):
         return 1
-    ref = Path(__file__).with_name("reference.lean")
-    if ref.is_file() and task.__name__ == "task":
-        r = await checker.check(ref.read_text(), name="reference.lean", footer=task.footer(task.TARGETS))
-        print(f"reference: compiles={r.ok} proved={task.proved(r.raw, task.TARGETS)}\n{r.shown.strip()[:4000]}")
+    ref = Path(__file__).with_name("reference.lean" if task.__name__ == "task" else f"reference_{task.__name__}.lean")
+    if ref.is_file():
+        r = await checker.check(ref.read_text(), name=ref.name, footer=task.footer(task.TARGETS))
+        got = [n for n, ok in task.proved(r.raw, task.TARGETS).items() if ok]
+        print(f"reference: compiles={r.ok} proved={got}\n{r.shown.strip()[:4000]}")
+        if not got:
+            return 1
     print("SELFTEST_OK")
     return 0
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--task", default="task", help="task module in this folder: task (n=2), task3 (n=3) or task_multi (n=2..5)")
+    p.add_argument("--task", default="task", help="task module in this folder: task (n=2), task3 (n=3), task_multi (n=2..5), task_sens (Boolean sensitivity) or task_hard3 (one hard bound)")
     p.add_argument("--lean-cmd", default=os.environ.get("MESH_LEAN_CMD", '["lean"]'), help="JSON list: command that compiles a file")
     p.add_argument("--lean-scratch", default=os.environ.get("MESH_LEAN_SCRATCH"))
     p.add_argument("--lean-timeout", type=float, default=240)
@@ -104,10 +120,13 @@ def main() -> int:
     p.add_argument("--max-completion-tokens", type=int, default=8192)
     p.add_argument("--context-window", type=int, default=65536, help="tokens the model accepts for prompt + reply")
     p.add_argument("--compact-at", type=int, default=30000, help="estimated history size at which an agent summarizes itself")
+    p.add_argument("--checkin-after", type=float, default=600,
+                   help="seconds an agent may sleep, while teammates work and tasks are open, before a check-in wakes it (0 = never)")
+    p.add_argument("--goal-grace", type=float, default=300, help="seconds a swarm may keep running after it completes the goal task")
     p.add_argument("--request-timeout", type=float, default=1800, help="seconds to wait for one model reply; long reasoning needs minutes")
     p.add_argument("--parallel", action="store_true")
     p.add_argument("--out")
-    p.add_argument("--lessons", help="file with starting lessons")
+    p.add_argument("--lessons", help="file with starting lessons; several separated by commas means the first that exists")
     a = p.parse_args()
     global task
     task = importlib.import_module(a.task)
@@ -126,6 +145,7 @@ def main() -> int:
                          context_window=a.context_window)
     limits = Limits(max_cost_usd=a.max_cost, max_steps_per_agent=a.max_steps, timeout_s=a.timeout,
                     max_total_tokens=a.max_tokens, compact_at_tokens=a.compact_at,
+                    checkin_after_s=a.checkin_after or None, goal_grace_s=a.goal_grace,
                     max_agents=a.max_agents, max_subagents=a.max_subagents)
     out = a.out or os.path.join("runs", a.task + "-" + time.strftime("%Y%m%d-%H%M%S"))
 
@@ -133,12 +153,14 @@ def main() -> int:
         for r in gen.runs:
             print(f"gen {gen.number} {r.label:8} score {r.grade.score}/10 cost ${r.shape['cost_usd']} "
                   f"checks {r.shape['lean_checks']} ({r.shape['lean_checks_ok']} complete) | {r.grade.reasons}", flush=True)
+            when = {n: r.shape["progress"].get(n) for n, _ in task.TARGETS if n in r.shape["progress"]}
+            print(f"    first in the deliverable (minutes): " + (", ".join(f"{n} {t // 60}" for n, t in when.items()) or "nothing"), flush=True)
 
     result = asyncio.run(evolve(
         task.TASK, model, generations=a.generations, population=a.population, control=a.controls, agents=a.agents,
         out=out, limits=limits, pricing=pricing, grade=task.make_grader(checker, task.TARGETS),
         tools=[lean_tool(checker, task.ABOUT_HEADER)], deliverable=task.DELIVERABLE, kind=task.KIND, parallel=a.parallel,
-        lessons=Path(a.lessons).read_text() if a.lessons else "", on_generation=progress))
+        lessons=starting_lessons(a.lessons), on_generation=progress))
     u = result.review_usage
     print(f"reviewer tokens: {u.prompt} in, {u.completion} out (about ${pricing.cost(u):.4f})")
     print(f"summary: {result.out / 'summary.md'}")

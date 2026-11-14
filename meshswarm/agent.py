@@ -8,6 +8,7 @@ steps) -> when the model answers without tool calls, go idle again.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
@@ -31,13 +32,17 @@ Working norms:
 - Before posting tasks, read the board again: a peer may have just posted the same plan. Build on their plan instead of posting your own.
 - Split big work into tasks on the board; let others claim them.
 - You are free to grow the team. When a problem is hard or has more than one plausible approach, create new peers (spawn_agent) or private sub-agents (delegate) to explore different directions at the same time, each with clear instructions on the direction it should take. Do this whenever you judge it useful; you do not need anyone's permission.
+- On a hard problem, do not try to solve all of it in your head in one long reply. Besides exploring in parallel, make simple attempts early: produce something small that passes whatever check you have (for a proof, a helper lemma or a special case that compiles; for other work, one piece that can be verified). Build on what checks, and record it in a file so others can use it.
 - Peers (spawn_agent) join the mesh as equals and share ongoing work with everyone. Sub-agents (delegate) do one job with a fresh context and report only to you through collect(); they also keep bulky work (reading many files, drafting, checking) out of your own context.
 - Message a specific agent when you need something from them or have something they need. Keep messages short; put long content in files and send the path.
 - Record results: complete_task with a short result, and write substantial output to files.
 - Only a task's owner can complete it. If you agreed that someone else will finish a task you hold, hand it over with handover_task.
-- The final deliverable for the goal goes in FINAL.md in the workspace, unless the goal says otherwise. Agree with peers on who assembles it.
+- The final deliverable for the goal goes in FINAL.md in the workspace, unless the goal says otherwise.
+- Put your work into the deliverable as soon as each piece is done and checked. Add small pieces one at a time, yourself, instead of saving up a large merge for the end or for someone else: work that is finished but not in the deliverable counts for nothing. Change only your own part, and check that the deliverable is still intact after every addition.
+- When the goal is met and the deliverable has passed its check, complete the goal task (task #1 unless told otherwise). That ends the run for everyone, so do it only when the deliverable is really finished, and do it promptly then. Do not keep re-verifying finished work: one confirming check of the final deliverable is enough.
 - Act through tools. Saying you will do something does nothing; do it now with a tool call.
-- Waiting: when you are waiting on someone or have nothing useful to do, call wait(). You sleep until a message arrives, and you are always woken when someone messages you.
+- Before you wait, look for something useful to do on your own initiative: work on the board that is unclaimed or stalled, a teammate's stuck problem that deserves a second attempt by a different route, finished work that has not reached the deliverable yet, or a result that has had no check at all. Tell the others what you are picking up.
+- Waiting: call wait() only when none of that applies, or you are blocked on a specific reply. You sleep until a message arrives. If you sleep a long time while teammates are still working, you get a short check-in listing what is still open.
 - Check measurable requirements (such as word limits) with the counts the file tools return, not by estimating.
 - Never check for updates by repeatedly reading the board, files or other agents. That wastes budget; you will be told when something changes.
 """
@@ -47,6 +52,7 @@ SUB_PROMPT = """You are {name}, a private sub-agent working for {parent}.{role_l
 - Files: you share {parent}'s workspace{shared_line}. Put long output in files and report their paths.
 - When you are done, call report(result) with a short result. If you cannot finish, report what you did and what blocked you. Saying you are done without calling report does nothing.
 - If the task is unclear, make a sensible assumption and state it in your report; you cannot ask questions mid-task.
+- If the task is hard, do not try to solve all of it in one long reply. Start with something small that passes whatever check you have (for a proof, a helper lemma or a special case that compiles), build on it, and report partial progress that checks rather than nothing.
 - Check measurable requirements (such as word limits) with the counts the file tools return.{delegate_line}
 """
 
@@ -109,6 +115,7 @@ class MeshAgent:
         self.role = role
         self.instructions = instructions
         self.status = "idle"  # idle | working | stopped
+        self.idle_since: float | None = None  # when it last went to sleep (monotonic clock)
         self.inbox: list[tuple[str, str]] = []
         self.wake = asyncio.Event()
         self.history: list[dict[str, Any]] = []
@@ -210,6 +217,7 @@ class MeshAgent:
                 self.status = "working"
                 self.seen_reads.clear()
                 self.poll_streak = 0
+                self.idle_since = None
                 world.log.emit("wake", self.name)
                 self._drain_inbox()
                 await self._turn()
@@ -218,6 +226,7 @@ class MeshAgent:
                     self.finish_task(f"(ended without calling report) {last}".strip(), auto=True)
                 if self.status == "working":
                     self.status = "idle"
+                    self.idle_since = time.monotonic()
                 world.log.emit("idle", self.name)
                 world.check_quiescent()
         except RunStopped:

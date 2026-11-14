@@ -50,7 +50,7 @@ def _seed_message(goal: str, names: list[str]) -> str:
         f"A new goal was posted as task #1:\n\n{goal}\n\n"
         f"Agents in the mesh right now: {', '.join(names)}. Nobody is in charge. "
         "Look at the board, decide together how to split the work, claim tasks before doing them, "
-        "and make sure someone assembles FINAL.md and completes task #1 when the goal is met."
+        "build the deliverable up as pieces are finished, and complete task #1 when the goal is met: that ends the run for everyone."
     )
 
 
@@ -69,13 +69,25 @@ def _team_seed(spec: TeamSpec, goal_id: int, names: list[str], liaisons: set[str
     )
 
 
+async def _checkins(world: World, every_s: float) -> None:
+    while not world.done.is_set():
+        await asyncio.sleep(every_s)
+        world.check_in()
+
+
 async def _run(world: World, limits: Limits) -> None:
+    checkins = None
+    if limits.checkin_after_s is not None:
+        checkins = asyncio.ensure_future(_checkins(world, max(min(30.0, limits.checkin_after_s / 4), 0.02)))
     try:
         await asyncio.wait_for(world.done.wait(), timeout=limits.timeout_s)
     except asyncio.TimeoutError:
         world.stop(f"timeout after {limits.timeout_s}s")
     finally:
         world.stop("interrupted")  # no-op if already stopped
+        if checkins is not None:
+            checkins.cancel()
+            await asyncio.gather(checkins, return_exceptions=True)
         for task in world._runners:
             task.cancel()
         await asyncio.gather(*world._runners, return_exceptions=True)
