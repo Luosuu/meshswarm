@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import kernels  # noqa: E402
+import lulesh  # noqa: E402
 from meshswarm import ChatEndpoint, Limits  # noqa: E402
 from meshswarm.pricing import lookup  # noqa: E402
 from meshswarm.shell import ShellRunner, run_tool  # noqa: E402
@@ -129,7 +130,44 @@ async def preflight(runner: ShellRunner, cores: int) -> None:
         raise SystemExit(f"sandbox preflight failed: expected an OpenMP program to report {cores} threads")
 
 
+async def selftest_lulesh(runner: ShellRunner) -> int:
+    """Build and run the original, then check the grader: the original scores no speedup, a version that
+    is deliberately slower still validates, and a version that computes something else is rejected."""
+    ws = Path(tempfile.mkdtemp(prefix="hpc-selftest-", dir=os.environ.get("MESH_RUN_SCRATCH")))
+    for rel, text in lulesh.starting_files().items():
+        (ws / rel).write_text(text)
+    print(f"workspace {ws}; cores {runner.cores_for(ws)}")
+    r = await runner.run("${CXX:-g++} --version | head -1; nproc; bash build.sh && ./lulesh %s" % lulesh.DEV_ARGS, ws, 600)
+    print(f"build + example run (exit {r.exit_code}, {r.seconds}s):\n{r.output.strip()[-700:]}")
+    if r.exit_code != 0 or lulesh.answer(r.output) is None:
+        return 1
+
+    class Result:
+        workspace = ws
+
+    grade = lulesh.make_grader(runner)
+    g = await grade(Result())
+    print(f"untouched source -> {g}")
+    if "speedup" not in g.reasons:
+        return 1
+    src = ws / "lulesh.cc"
+    original = src.read_text()
+    changed = original.replace("Real_t(0.01)", "Real_t(0.02)", 1)  # a different hourglass coefficient
+    if changed == original:
+        print("could not make the wrong-answer variant")
+        return 1
+    src.write_text(changed)
+    g = await grade(Result())
+    print(f"different physics -> {g}")
+    if g.score != 0.0 or "the original gives" not in g.reasons:
+        return 1
+    print("SELFTEST_OK")
+    return 0
+
+
 async def selftest(name: str, runner: ShellRunner, cores: int) -> int:
+    if name == "lulesh":
+        return await selftest_lulesh(runner)
     ws = Path(tempfile.mkdtemp(prefix="hpc-selftest-", dir=os.environ.get("MESH_RUN_SCRATCH")))
     for rel, text in kernels.starting_files(name).items():
         (ws / rel).write_text(text)
@@ -164,7 +202,7 @@ async def selftest(name: str, runner: ShellRunner, cores: int) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--kernel", choices=sorted(kernels.KERNELS), default="amr")
+    p.add_argument("--kernel", choices=sorted(kernels.KERNELS) + ["lulesh"], default="amr")
     p.add_argument("--cores", type=int, default=8, help="cores each swarm gets, for its own runs and for grading")
     p.add_argument("--selftest", action="store_true")
     p.add_argument("--base-url", default=os.environ.get("MESH_BASE_URL", TINKER))
@@ -217,11 +255,16 @@ def main() -> int:
                   f"ran {(r.shape['seconds'] or 0) // 60} min, stopped by {r.shape['stop']}, "
                   f"{r.shape['delegations']} delegations | {r.grade.reasons}", flush=True)
 
+    if a.kernel == "lulesh":
+        task, grader, files, protect = lulesh.task_text(a.cores), lulesh.make_grader(runner), lulesh.starting_files(), lulesh.PROTECT
+    else:
+        task, grader, files, protect = (kernels.task_text(a.kernel, a.cores), kernels.make_grader(a.kernel, runner),
+                                        kernels.starting_files(a.kernel), ["build.sh", "*.c", "*.h"])
     result = asyncio.run(evolve(
-        kernels.task_text(a.kernel, a.cores), model, generations=a.generations, population=a.population, agents=a.agents,
-        out=out, limits=limits, pricing=pricing, grade=kernels.make_grader(a.kernel, runner),
-        tools=[run_tool(runner, f"gcc with OpenMP is available; you have {a.cores} cores.")],
-        deliverable="build.sh", protect=["build.sh", "*.c", "*.h"], files=kernels.starting_files(a.kernel), kind=kernels.KIND, parallel=a.parallel,
+        task, model, generations=a.generations, population=a.population, agents=a.agents,
+        out=out, limits=limits, pricing=pricing, grade=grader,
+        tools=[run_tool(runner, f"gcc and g++ with OpenMP are available; you have {a.cores} cores.")],
+        deliverable="build.sh", protect=protect, files=files, kind=kernels.KIND, parallel=a.parallel,
         lessons=starting_lessons(a.lessons), on_generation=progress))
     u = result.review_usage
     print(f"reviewer tokens: {u.prompt} in, {u.completion} out (about ${pricing.cost(u):.4f})")

@@ -150,15 +150,20 @@ def score_of(speedup: float) -> float:
 TIMED = re.compile(r"MESHTIME ([0-9.]+)")
 
 
-async def _times(runner: ShellRunner, command: str, workspace: Path, limit: float, repeats: int) -> tuple[list[float] | None, str]:
+def _validates(output: str) -> bool:
+    return "Solution validates" in output
+
+
+async def _times(runner: ShellRunner, command: str, workspace: Path, limit: float, repeats: int,
+                 ok=_validates) -> tuple[list[float] | None, str]:
     """Wall time of each of `repeats` runs, measured by the shell inside the sandbox so that starting
-    the sandbox itself is not counted. None when a run fails, times out or does not validate."""
+    the sandbox itself is not counted. None when a run fails, times out or its output is not `ok`."""
     times, last = [], ""
     for _ in range(repeats):
         r = await runner.run(f"TIMEFORMAT='MESHTIME %R'; time {command}", workspace, limit)
         last = r.output
         found = TIMED.findall(r.output)  # the shell prints its line after the program has exited: take the last
-        if r.timed_out or r.exit_code != 0 or "Solution validates" not in r.output or not found:
+        if r.timed_out or r.exit_code != 0 or not ok(r.output) or not found:
             return None, last
         times.append(float(found[-1]))
     return times, last

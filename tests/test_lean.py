@@ -268,6 +268,25 @@ class HpcKernels(unittest.TestCase):
         (ws / "pic.c").write_text('#pragma GCC optimize ("fast-math")\nint main(){return 0;}\n')
         self.assertIn("pic.c", kernels.unsafe_math_flag(ws))
 
+    def test_lulesh_task_and_answer_check(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "hpc"))
+        import lulesh
+
+        files = lulesh.starting_files()
+        self.assertIn("-fopenmp -DUSE_MPI=0", files["build.sh"])
+        self.assertIn("lulesh.cc", files)
+        self.assertIn("same iteration count", lulesh.task_text(8))
+        out = "Run completed:\n   Iteration count     =  932\n   Final Origin Energy =  2.025075e+05\n"
+        self.assertEqual(lulesh.answer(out), (932, 202507.5))
+        self.assertIsNone(lulesh.answer("Segmentation fault"))
+        want = (932, 202507.5)
+        self.assertTrue(lulesh.same_answer((932, 202507.6), want))
+        self.assertFalse(lulesh.same_answer((932, 202509.0), want))
+        self.assertFalse(lulesh.same_answer((931, 202507.5), want))
+        self.assertFalse(lulesh.same_answer((932, float("nan")), want))
+        self.assertFalse(lulesh.same_answer(None, want))
+        self.assertEqual([lulesh.score_of(x) for x in (1.0, 1.1, 1.6, 10.0)], [0.0, 1.0, 4.0, 10.0])
+
 
 if __name__ == "__main__":
     unittest.main()
