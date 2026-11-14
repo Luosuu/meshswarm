@@ -26,7 +26,9 @@ from meshevolve import Grade
 
 PRK = Path(__file__).with_name("prk")
 VERSION_FLAG = "-DPRKVERSION='\"2.17\"'"
-THRESHOLDS = [1.5, 2.5, 4.0, 5.5, 7.0]  # speedup rungs; score = share of rungs reached
+# Speedup rungs; score = share of rungs reached. The first run reached 9.5x in its first generation,
+# so the ladder goes well past that to leave room for later generations.
+THRESHOLDS = [2.0, 4.0, 6.0, 8.0, 10.0, 13.0, 16.0, 20.0, 25.0, 32.0]
 KIND = "making a scientific program faster on a multi-core machine, as a team with a compile-and-run tool"
 
 KERNELS: dict[str, dict[str, Any]] = {

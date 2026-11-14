@@ -248,7 +248,7 @@ class HpcKernels(unittest.TestCase):
             src.write_text(src.read_text().replace('printf("Solution validates\\n");', 'printf("fine\\n");'))
             self.assertFalse(kernels.verification_intact(name, ws))
             self.assertIn("run_command", kernels.task_text(name, 8))
-        self.assertEqual([kernels.score_of(x) for x in (1.0, 1.5, 3.9, 4.0, 100.0)], [0.0, 2.0, 4.0, 6.0, 10.0])
+        self.assertEqual([kernels.score_of(x) for x in (1.0, 2.0, 9.48, 6.3, 100.0)], [0.0, 1.0, 4.0, 3.0, 10.0])
 
 
 if __name__ == "__main__":
