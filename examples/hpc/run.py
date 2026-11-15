@@ -1,4 +1,4 @@
-"""Run meshevolve on a performance task (AMR or PIC) with a sandboxed compile-and-run tool.
+"""Run meshevolve on a performance task (AMR, its stricter variant amrx, PIC or LULESH) with a sandboxed compile-and-run tool.
 
     python examples/hpc/run.py --kernel amr --generations 3 --population 2
 
@@ -177,9 +177,10 @@ async def selftest(name: str, runner: ShellRunner, cores: int) -> int:
              "(ping -c1 -W1 1.1.1.1 >/dev/null 2>&1 && echo network:reachable || echo network:none); ls ~ 2>&1 | head -3")
     r = await runner.run(probe, ws, 120)
     print(f"sandbox probe (exit {r.exit_code}, {r.seconds}s):\n{r.output.strip()}")
-    r = await runner.run("bash build.sh && ./%s %s" % (name, kernels.KERNELS[name]["dev_args"]), ws, 300)
+    exe, by_norms = kernels.binary(name), bool(kernels.KERNELS[name].get("norms"))
+    r = await runner.run("bash build.sh && ./%s %s" % (exe, kernels.KERNELS[name]["dev_args"]), ws, 300)
     print(f"build + example run (exit {r.exit_code}, {r.seconds}s):\n{r.output.strip()[-400:]}")
-    if r.exit_code != 0 or "Solution validates" not in r.output:
+    if r.exit_code != 0 or (kernels.norms(r.output) is None if by_norms else "Solution validates" not in r.output):
         return 1
 
     class Result:
@@ -190,12 +191,19 @@ async def selftest(name: str, runner: ShellRunner, cores: int) -> int:
     print(f"untouched source -> {g}")
     if g.score != 0.0 or "speedup" not in g.reasons:
         return 1
-    src = ws / f"{name}.c"
-    src.write_text(src.read_text().replace('printf("Solution validates\\n");', 'printf("ok\\n");'))
-    g = await grade(Result())
-    print(f"verification removed -> {g}")
-    if g.score != 0.0 or "verification" not in g.reasons:
-        return 1
+    src = ws / f"{exe}.c"
+    if by_norms:  # the shortcut every swarm took on the published AMR: skip the sweeps that feed the input field
+        src.write_text(src.read_text().replace("IN(i,j) += FEEDBACK*OUT(i,j);", ";"))
+        g = await grade(Result())
+        print(f"input field no longer updated -> {g}")
+        if g.score != 0.0 or "the original gives" not in g.reasons:
+            return 1
+    else:
+        src.write_text(src.read_text().replace('printf("Solution validates\\n");', 'printf("ok\\n");'))
+        g = await grade(Result())
+        print(f"verification removed -> {g}")
+        if g.score != 0.0 or "verification" not in g.reasons:
+            return 1
     print("SELFTEST_OK")
     return 0
 

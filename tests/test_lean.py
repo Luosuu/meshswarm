@@ -249,6 +249,23 @@ class HpcKernels(unittest.TestCase):
             self.assertFalse(kernels.verification_intact(name, ws))
             self.assertIn("run_command", kernels.task_text(name, 8))
         self.assertEqual([kernels.score_of(x) for x in (1.0, 2.0, 9.48, 6.3, 100.0)], [0.0, 1.0, 4.0, 3.0, 10.0])
+        # The stricter AMR variant: same files and program name, a field that changes every sweep,
+        # and an answer that is compared with the original's instead of validated by the program.
+        strict = kernels.starting_files("amrx")
+        self.assertIn("-o amr", strict["build.sh"])
+        self.assertIn("IN(i,j) += FEEDBACK*OUT(i,j);", strict["amr.c"])
+        self.assertNotIn("Solution validates", strict["amr.c"])
+        self.assertNotIn("FEEDBACK", kernels.starting_files("amr")["amr.c"])
+        self.assertIn("Norms:", kernels.task_text("amrx", 8))
+        self.assertNotIn("Solution validates", kernels.task_text("amrx", 8))
+        line = "Norms: " + " ".join(f"{v:.12e}" for v in range(1, 11))
+        want = kernels.norms(f"header\n{line}\nRate (MFlops/s): 1.0\n")
+        self.assertEqual(want, [float(v) for v in range(1, 11)])
+        self.assertIsNone(kernels.norms("Norms: 1.0 2.0\n"))
+        self.assertIsNone(kernels.norms(line.replace("1.000000000000e+00", "nan")))
+        self.assertTrue(kernels.same_norms([v * (1 + 1e-12) for v in want], want))
+        self.assertFalse(kernels.same_norms([want[0] * (1 + 1e-6)] + want[1:], want))
+        self.assertFalse(kernels.same_norms(None, want))
         import run as hpc_run
 
         # 16 logical processors: 8 cores with two threads each, in two memory regions of 4 cores.
