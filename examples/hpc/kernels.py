@@ -15,6 +15,7 @@ of data layout must touch it); results worth reporting should also be read by a 
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 import statistics
@@ -177,7 +178,13 @@ def make_grader(name: str, runner: ShellRunner, repeats: int = 5, baseline_repea
     k = KERNELS[name]
     baselines: dict[tuple[str, str | None], list[float]] = {}  # measured once per case and core set, then reused
 
+    turn = asyncio.Lock()  # one workspace is graded at a time: two programs timed at once slow each other down
+
     async def grade(result: RunResult) -> Grade:
+        async with turn:
+            return await grade_one(result)
+
+    async def grade_one(result: RunResult) -> Grade:
         ws = Path(result.workspace)
         if not (ws / "build.sh").is_file():
             return Grade(0.0, "no build.sh in the workspace")

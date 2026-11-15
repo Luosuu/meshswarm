@@ -12,6 +12,7 @@ origin energy. The program cannot know those answers without doing the simulatio
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 import statistics
@@ -118,7 +119,13 @@ def make_grader(runner: ShellRunner, repeats: int = 5, baseline_repeats: int = 3
     cases = test_args or TEST_ARGS
     baselines: dict[tuple[str, str | None], tuple[list[float], tuple[int, float]]] = {}  # once per case and core set
 
+    turn = asyncio.Lock()  # one workspace is graded at a time: two programs timed at once slow each other down
+
     async def grade(result: RunResult) -> Grade:
+        async with turn:
+            return await grade_one(result)
+
+    async def grade_one(result: RunResult) -> Grade:
         ws = Path(result.workspace)
         if not (ws / "build.sh").is_file():
             return Grade(0.0, "no build.sh in the workspace")
