@@ -1,4 +1,4 @@
-"""Run meshevolve on a performance task (AMR, its stricter variant amrx, PIC or LULESH) with a sandboxed compile-and-run tool.
+"""Run meshevolve on a performance task (AMR, its stricter variant amrx, PIC, LULESH or CoMD) with a sandboxed compile-and-run tool.
 
     python examples/hpc/run.py --kernel amr --generations 3 --population 2
 
@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import kernels  # noqa: E402
+import comd  # noqa: E402
 import lulesh  # noqa: E402
 from meshswarm import ChatEndpoint, Limits  # noqa: E402
 from meshswarm.pricing import lookup  # noqa: E402
@@ -130,29 +131,37 @@ async def preflight(runner: ShellRunner, cores: int) -> None:
         raise SystemExit(f"sandbox preflight failed: expected an OpenMP program to report {cores} threads")
 
 
-async def selftest_lulesh(runner: ShellRunner) -> int:
-    """Build and run the original, then check the grader: the original scores no speedup, a version that
-    is deliberately slower still validates, and a version that computes something else is rejected."""
+# The whole applications: module, program, example arguments, and a one-line change that alters the physics.
+APPS = {
+    "lulesh": (lulesh, "lulesh", lulesh.DEV_ARGS, "lulesh.cc", "Real_t(0.01)", "Real_t(0.02)"),  # hourglass coefficient
+    "comd": (comd, "CoMD", comd.DEV_ARGS, "ljForce.c", "(12.0*r6 - 6.0)", "(12.0*r6 - 6.5)"),  # the pair force
+}
+
+
+async def selftest_app(name: str, runner: ShellRunner) -> int:
+    """Build and run the original, then check the grader: the original scores no speedup, and a version
+    that computes something else is rejected."""
+    app, exe, dev_args, src_name, old, new = APPS[name]
     ws = Path(tempfile.mkdtemp(prefix="hpc-selftest-", dir=os.environ.get("MESH_RUN_SCRATCH")))
-    for rel, text in lulesh.starting_files().items():
+    for rel, text in app.starting_files().items():
         (ws / rel).write_text(text)
     print(f"workspace {ws}; cores {runner.cores_for(ws)}")
-    r = await runner.run("${CXX:-g++} --version | head -1; nproc; bash build.sh && ./lulesh %s" % lulesh.DEV_ARGS, ws, 600)
+    r = await runner.run("${CC:-gcc} --version | head -1; nproc; bash build.sh && ./%s %s" % (exe, dev_args), ws, 600)
     print(f"build + example run (exit {r.exit_code}, {r.seconds}s):\n{r.output.strip()[-700:]}")
-    if r.exit_code != 0 or lulesh.answer(r.output) is None:
+    if r.exit_code != 0 or app.answer(r.output) is None:
         return 1
 
     class Result:
         workspace = ws
 
-    grade = lulesh.make_grader(runner)
+    grade = app.make_grader(runner)
     g = await grade(Result())
     print(f"untouched source -> {g}")
     if "speedup" not in g.reasons:
         return 1
-    src = ws / "lulesh.cc"
+    src = ws / src_name
     original = src.read_text()
-    changed = original.replace("Real_t(0.01)", "Real_t(0.02)", 1)  # a different hourglass coefficient
+    changed = original.replace(old, new, 1)
     if changed == original:
         print("could not make the wrong-answer variant")
         return 1
@@ -166,8 +175,8 @@ async def selftest_lulesh(runner: ShellRunner) -> int:
 
 
 async def selftest(name: str, runner: ShellRunner, cores: int) -> int:
-    if name == "lulesh":
-        return await selftest_lulesh(runner)
+    if name in APPS:
+        return await selftest_app(name, runner)
     ws = Path(tempfile.mkdtemp(prefix="hpc-selftest-", dir=os.environ.get("MESH_RUN_SCRATCH")))
     for rel, text in kernels.starting_files(name).items():
         (ws / rel).write_text(text)
@@ -210,7 +219,7 @@ async def selftest(name: str, runner: ShellRunner, cores: int) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--kernel", choices=sorted(kernels.KERNELS) + ["lulesh"], default="amr")
+    p.add_argument("--kernel", choices=sorted(kernels.KERNELS) + sorted(APPS), default="amr")
     p.add_argument("--cores", type=int, default=8, help="cores each swarm gets, for its own runs and for grading")
     p.add_argument("--selftest", action="store_true")
     p.add_argument("--base-url", default=os.environ.get("MESH_BASE_URL", TINKER))
@@ -263,8 +272,9 @@ def main() -> int:
                   f"ran {(r.shape['seconds'] or 0) // 60} min, stopped by {r.shape['stop']}, "
                   f"{r.shape['delegations']} delegations | {r.grade.reasons}", flush=True)
 
-    if a.kernel == "lulesh":
-        task, grader, files, protect = lulesh.task_text(a.cores), lulesh.make_grader(runner), lulesh.starting_files(), lulesh.PROTECT
+    if a.kernel in APPS:
+        app = APPS[a.kernel][0]
+        task, grader, files, protect = app.task_text(a.cores), app.make_grader(runner), app.starting_files(), app.PROTECT
     else:
         task, grader, files, protect = (kernels.task_text(a.kernel, a.cores), kernels.make_grader(a.kernel, runner),
                                         kernels.starting_files(a.kernel), ["build.sh", "*.c", "*.h"])

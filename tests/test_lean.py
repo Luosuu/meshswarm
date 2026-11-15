@@ -304,6 +304,31 @@ class HpcKernels(unittest.TestCase):
         self.assertFalse(lulesh.same_answer(None, want))
         self.assertEqual([lulesh.score_of(x) for x in (1.0, 1.1, 1.6, 10.0)], [0.0, 1.0, 4.0, 10.0])
 
+    def test_comd_task_and_answer_check(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "hpc"))
+        import comd
+
+        files = comd.starting_files()
+        self.assertIn("-fopenmp -DDOUBLE", files["build.sh"])
+        for name in ("CoMD.c", "ljForce.c", "eam.c", "CoMD_info.h", "Cu_u6.eam"):
+            self.assertIn(name, files)
+        self.assertIn("(12.0*r6 - 6.0)", files["ljForce.c"])  # the line the self-test changes
+        self.assertIn("no atoms are lost", comd.task_text(8))
+        out = ("#  Loop   Time(fs)       Total Energy   Potential Energy     Kinetic Energy  Temperature   (us/atom)     # Atoms\n"
+               "      0       0.00    -1.166063303169    -1.243619295635     0.077555992466     600.0000     0.0000       108000\n"
+               "    100     100.00    -1.166053919319    -1.208063725591     0.042009806272     325.0002     0.4512       108000\n"
+               "\nSimulation Validation:\n  Final atom count : 108000, no atoms lost\n")
+        want = (100, 108000, -1.166053919319, -1.208063725591, 0.042009806272)
+        self.assertEqual(comd.answer(out), want)
+        self.assertIsNone(comd.answer(out.replace(", no atoms lost", "")))
+        self.assertIsNone(comd.answer("Segmentation fault"))
+        self.assertTrue(comd.same_answer((100, 108000, -1.166053919320, -1.208063725590, 0.042009806273), want))
+        self.assertFalse(comd.same_answer((100, 108000, -1.1660, -1.208063725591, 0.042009806272), want))
+        self.assertFalse(comd.same_answer((100, 108000, -1.166053919319, -1.208063725591, 0.042019806272), want))
+        self.assertFalse(comd.same_answer((90, 108000) + want[2:], want))
+        self.assertFalse(comd.same_answer((100, 107999) + want[2:], want))
+        self.assertFalse(comd.same_answer(None, want))
+
 
 if __name__ == "__main__":
     unittest.main()

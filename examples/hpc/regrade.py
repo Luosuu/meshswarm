@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import kernels  # noqa: E402
 import lulesh  # noqa: E402
+from run import APPS  # noqa: E402
 from meshswarm.shell import ShellRunner  # noqa: E402
 from run import core_sets  # noqa: E402
 
@@ -30,14 +31,14 @@ STRIP = re.compile(r"\s(-ffast-math|-Ofast|-ffinite-math-only|-funsafe-math-opti
 
 async def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--kernel", choices=sorted(kernels.KERNELS) + ["lulesh"], required=True)
+    p.add_argument("--kernel", choices=sorted(kernels.KERNELS) + sorted(APPS), required=True)
     p.add_argument("--cores", type=int, default=8)
     p.add_argument("--strip-fast-math", action="store_true")
-    p.add_argument("--args", action="append", help="LULESH only: time these arguments instead of the held-out ones; may be repeated")
+    p.add_argument("--args", action="append", help="LULESH and CoMD only: time these arguments instead of the held-out ones; may be repeated")
     p.add_argument("workspaces", nargs="+")
     a = p.parse_args()
     runner = ShellRunner(json.loads(os.environ.get("MESH_RUN_WRAP", '["bash", "-c"]')), core_sets=core_sets(a.cores, 1))
-    grade = lulesh.make_grader(runner, test_args=a.args) if a.kernel == "lulesh" else kernels.make_grader(a.kernel, runner)  # one grader: the serial baseline is timed once and shared
+    grade = APPS[a.kernel][0].make_grader(runner, test_args=a.args) if a.kernel in APPS else kernels.make_grader(a.kernel, runner)  # one grader: the serial baseline is timed once and shared
     for src in a.workspaces:
         ws = Path(tempfile.mkdtemp(prefix="regrade-", dir=os.environ.get("MESH_RUN_SCRATCH"))) / "ws"
         shutil.copytree(src, ws, ignore=shutil.ignore_patterns(".mesh"))
