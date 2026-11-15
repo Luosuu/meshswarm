@@ -1,0 +1,594 @@
+--- examples/hpc/lulesh_src/lulesh.cc	2026-11-14 17:22:42
++++ runs/lulesh-g1/gen-01/run-1/lulesh.cc	2026-11-14 21:30:09
+@@ -493,7 +493,6 @@
+ 
+ static inline
+ void IntegrateStressForElems( Domain &domain,
+-                              Real_t *sigxx, Real_t *sigyy, Real_t *sigzz,
+                               Real_t *determ, Index_t numElem, Index_t numNode)
+ {
+ #if _OPENMP
+@@ -537,16 +536,17 @@
+     CalcElemNodeNormals( B[0] , B[1], B[2],
+                           x_local, y_local, z_local );
+ 
++    const Real_t sig = - domain.p(k) - domain.q(k) ;
+     if (numthreads > 1) {
+        // Eliminate thread writing conflicts at the nodes by giving
+        // each element its own copy to write to
+-       SumElemStressesToNodeForces( B, sigxx[k], sigyy[k], sigzz[k],
++       SumElemStressesToNodeForces( B, sig, sig, sig,
+                                     &fx_elem[k*8],
+                                     &fy_elem[k*8],
+                                     &fz_elem[k*8] ) ;
+     }
+     else {
+-       SumElemStressesToNodeForces( B, sigxx[k], sigyy[k], sigzz[k],
++       SumElemStressesToNodeForces( B, sig, sig, sig,
+                                     fx_local, fy_local, fz_local ) ;
+ 
+        // copy nodal force contributions to global force arrray.
+@@ -730,9 +730,9 @@
+   
+    Index_t numElem8 = numElem * 8 ;
+ 
+-   Real_t *fx_elem; 
+-   Real_t *fy_elem; 
+-   Real_t *fz_elem; 
++   Real_t *fx_elem = NULL; 
++   Real_t *fy_elem = NULL; 
++   Real_t *fz_elem = NULL; 
+ 
+    if(numthreads > 1) {
+       fx_elem = Allocate<Real_t>(numElem8) ;
+@@ -998,12 +998,15 @@
+ {
+    Index_t numElem = domain.numElem() ;
+    Index_t numElem8 = numElem * 8 ;
+-   Real_t *dvdx = Allocate<Real_t>(numElem8) ;
+-   Real_t *dvdy = Allocate<Real_t>(numElem8) ;
+-   Real_t *dvdz = Allocate<Real_t>(numElem8) ;
+-   Real_t *x8n  = Allocate<Real_t>(numElem8) ;
+-   Real_t *y8n  = Allocate<Real_t>(numElem8) ;
+-   Real_t *z8n  = Allocate<Real_t>(numElem8) ;
++   // one contiguous block for all six per-element arrays: better locality in
++   // the write loop below (single stream instead of six)
++   Real_t *scratch = Allocate<Real_t>(6*numElem8) ;
++   Real_t *dvdx = scratch ;
++   Real_t *dvdy = scratch + numElem8 ;
++   Real_t *dvdz = scratch + 2*numElem8 ;
++   Real_t *x8n  = scratch + 3*numElem8 ;
++   Real_t *y8n  = scratch + 4*numElem8 ;
++   Real_t *z8n  = scratch + 5*numElem8 ;
+ 
+    /* start loop over elements */
+ #pragma omp parallel for firstprivate(numElem)
+@@ -1046,12 +1049,7 @@
+                                     hgcoef, numElem, domain.numNode()) ;
+    }
+ 
+-   Release(&z8n) ;
+-   Release(&y8n) ;
+-   Release(&x8n) ;
+-   Release(&dvdz) ;
+-   Release(&dvdy) ;
+-   Release(&dvdx) ;
++   Release(&scratch) ;
+ 
+    return ;
+ }
+@@ -1064,18 +1062,12 @@
+    Index_t numElem = domain.numElem() ;
+    if (numElem != 0) {
+       Real_t  hgcoef = domain.hgcoef() ;
+-      Real_t *sigxx  = Allocate<Real_t>(numElem) ;
+-      Real_t *sigyy  = Allocate<Real_t>(numElem) ;
+-      Real_t *sigzz  = Allocate<Real_t>(numElem) ;
+       Real_t *determ = Allocate<Real_t>(numElem) ;
+ 
+-      /* Sum contributions to total stress tensor */
+-      InitStressTermsForElems(domain, sigxx, sigyy, sigzz, numElem);
+-
+       // call elemlib stress integration loop to produce nodal forces from
+       // material stresses.
+       IntegrateStressForElems( domain,
+-                               sigxx, sigyy, sigzz, determ, numElem,
++                               determ, numElem,
+                                domain.numNode()) ;
+ 
+       // check for negative element volume
+@@ -1093,9 +1085,6 @@
+       CalcHourglassControlForElems(domain, determ, hgcoef) ;
+ 
+       Release(&determ) ;
+-      Release(&sigzz) ;
+-      Release(&sigyy) ;
+-      Release(&sigxx) ;
+    }
+ }
+ 
+@@ -1501,7 +1490,7 @@
+ 
+ /******************************************/
+ 
+-//static inline
++static inline
+ void CalcKinematicsForElems( Domain &domain,
+                              Real_t deltaTime, Index_t numElem )
+ {
+@@ -1560,10 +1549,23 @@
+     CalcElemVelocityGradient( xd_local, yd_local, zd_local,
+                                B, detJ, D );
+ 
+-    // put velocity gradient quantities into their global arrays.
+-    domain.dxx(k) = D[0];
+-    domain.dyy(k) = D[1];
+-    domain.dzz(k) = D[2];
++    // put velocity gradient quantities into their global arrays,
++    // and do the strain-rate post-processing inline (avoids a second pass)
++    const Real_t vdov = D[0] + D[1] + D[2] ;
++    const Real_t vdovthird = vdov / Real_t(3.0) ;
++    domain.vdov(k) = vdov ;
++    domain.dxx(k) = D[0] - vdovthird ;
++    domain.dyy(k) = D[1] - vdovthird ;
++    domain.dzz(k) = D[2] - vdovthird ;
++
++    if (domain.vnew(k) <= Real_t(0.0))
++    {
++#if USE_MPI
++       MPI_Abort(MPI_COMM_WORLD, VolumeError) ;
++#else
++       exit(VolumeError);
++#endif
++    }
+   }
+ }
+ 
+@@ -1580,30 +1582,6 @@
+ 
+       CalcKinematicsForElems(domain, deltatime, numElem) ;
+ 
+-      // element loop to do some stuff not included in the elemlib function.
+-#pragma omp parallel for firstprivate(numElem)
+-      for ( Index_t k=0 ; k<numElem ; ++k )
+-      {
+-         // calc strain rate and apply as constraint (only done in FB element)
+-         Real_t vdov = domain.dxx(k) + domain.dyy(k) + domain.dzz(k) ;
+-         Real_t vdovthird = vdov/Real_t(3.0) ;
+-
+-         // make the rate of deformation tensor deviatoric
+-         domain.vdov(k) = vdov ;
+-         domain.dxx(k) -= vdovthird ;
+-         domain.dyy(k) -= vdovthird ;
+-         domain.dzz(k) -= vdovthird ;
+-
+-        // See if any volumes are negative, and take appropriate action.
+-         if (domain.vnew(k) <= Real_t(0.0))
+-        {
+-#if USE_MPI           
+-           MPI_Abort(MPI_COMM_WORLD, VolumeError) ;
+-#else
+-           exit(VolumeError);
+-#endif
+-        }
+-      }
+       domain.DeallocateStrains();
+    }
+ }
+@@ -2055,9 +2033,9 @@
+                         Real_t* qq_old, Real_t* ql_old,
+                         Real_t rho0,
+                         Real_t eosvmax,
+-                        Index_t length, Index_t *regElemList)
++                        Index_t length, Index_t *regElemList,
++                        Real_t* pHalfStep)
+ {
+-   Real_t *pHalfStep = Allocate<Real_t>(length) ;
+ 
+ #pragma omp parallel for firstprivate(length, emin)
+    for (Index_t i = 0 ; i < length ; ++i) {
+@@ -2170,8 +2148,6 @@
+       }
+    }
+ 
+-   Release(&pHalfStep) ;
+-
+    return ;
+ }
+ 
+@@ -2216,23 +2192,23 @@
+    Real_t emin    = domain.emin() ;
+    Real_t rho0    = domain.refdens() ;
+ 
+-   // These temporaries will be of different size for 
+-   // each call (due to different sized region element
+-   // lists)
+-   Real_t *e_old = Allocate<Real_t>(numElemReg) ;
+-   Real_t *delvc = Allocate<Real_t>(numElemReg) ;
+-   Real_t *p_old = Allocate<Real_t>(numElemReg) ;
+-   Real_t *q_old = Allocate<Real_t>(numElemReg) ;
+-   Real_t *compression = Allocate<Real_t>(numElemReg) ;
+-   Real_t *compHalfStep = Allocate<Real_t>(numElemReg) ;
+-   Real_t *qq_old = Allocate<Real_t>(numElemReg) ;
+-   Real_t *ql_old = Allocate<Real_t>(numElemReg) ;
+-   Real_t *work = Allocate<Real_t>(numElemReg) ;
+-   Real_t *p_new = Allocate<Real_t>(numElemReg) ;
+-   Real_t *e_new = Allocate<Real_t>(numElemReg) ;
+-   Real_t *q_new = Allocate<Real_t>(numElemReg) ;
+-   Real_t *bvc = Allocate<Real_t>(numElemReg) ;
+-   Real_t *pbvc = Allocate<Real_t>(numElemReg) ;
++   // one contiguous block for all per-region temporaries: single alloc/free per call
++   Real_t *block = Allocate<Real_t>(15*numElemReg) ;
++   Real_t *e_old = block + 0*numElemReg ;
++   Real_t *delvc = block + 1*numElemReg ;
++   Real_t *p_old = block + 2*numElemReg ;
++   Real_t *q_old = block + 3*numElemReg ;
++   Real_t *compression = block + 4*numElemReg ;
++   Real_t *compHalfStep = block + 5*numElemReg ;
++   Real_t *qq_old = block + 6*numElemReg ;
++   Real_t *ql_old = block + 7*numElemReg ;
++   Real_t *work = block + 8*numElemReg ;
++   Real_t *p_new = block + 9*numElemReg ;
++   Real_t *e_new = block + 10*numElemReg ;
++   Real_t *q_new = block + 11*numElemReg ;
++   Real_t *bvc = block + 12*numElemReg ;
++   Real_t *pbvc = block + 13*numElemReg ;
++   Real_t *pHalfStep = block + 14*numElemReg ;
+  
+    //loop to add load imbalance based on region number 
+    for(Int_t j = 0; j < rep; j++) {
+@@ -2291,7 +2267,7 @@
+                          vnewc, work,  delvc, pmin,
+                          p_cut, e_cut, q_cut, emin,
+                          qq_old, ql_old, rho0, eosvmax,
+-                         numElemReg, regElemList);
++                         numElemReg, regElemList, pHalfStep);
+    }
+ 
+ #pragma omp parallel for firstprivate(numElemReg)
+@@ -2307,20 +2283,7 @@
+                           pbvc, bvc, ss4o3,
+                           numElemReg, regElemList) ;
+ 
+-   Release(&pbvc) ;
+-   Release(&bvc) ;
+-   Release(&q_new) ;
+-   Release(&e_new) ;
+-   Release(&p_new) ;
+-   Release(&work) ;
+-   Release(&ql_old) ;
+-   Release(&qq_old) ;
+-   Release(&compHalfStep) ;
+-   Release(&compression) ;
+-   Release(&q_old) ;
+-   Release(&p_old) ;
+-   Release(&delvc) ;
+-   Release(&e_old) ;
++   Release(&block) ;
+ }
+ 
+ /******************************************/
+--- examples/hpc/lulesh_src/lulesh-init.cc	2026-11-14 17:22:42
++++ runs/lulesh-g1/gen-01/run-1/lulesh-init.cc	2026-11-14 20:51:56
+@@ -86,32 +86,25 @@
+ 
+    SetupCommBuffers(edgeNodes);
+ 
+-   // Basic Field Initialization 
++   // Basic Field Initialization
++#pragma omp parallel for
+    for (Index_t i=0; i<numElem(); ++i) {
+       e(i) =  Real_t(0.0) ;
+       p(i) =  Real_t(0.0) ;
+       q(i) =  Real_t(0.0) ;
+       ss(i) = Real_t(0.0) ;
+-   }
+-
+-   // Note - v initializes to 1.0, not 0.0!
+-   for (Index_t i=0; i<numElem(); ++i) {
++      // Note - v initializes to 1.0, not 0.0!
+       v(i) = Real_t(1.0) ;
+    }
+ 
++#pragma omp parallel for
+    for (Index_t i=0; i<numNode(); ++i) {
+       xd(i) = Real_t(0.0) ;
+       yd(i) = Real_t(0.0) ;
+       zd(i) = Real_t(0.0) ;
+-   }
+-
+-   for (Index_t i=0; i<numNode(); ++i) {
+       xdd(i) = Real_t(0.0) ;
+       ydd(i) = Real_t(0.0) ;
+       zdd(i) = Real_t(0.0) ;
+-   }
+-
+-   for (Index_t i=0; i<numNode(); ++i) {
+       nodalMass(i) = Real_t(0.0) ;
+    }
+ 
+@@ -156,6 +149,7 @@
+    cycle()   = Int_t(0) ;
+ 
+    // initialize field data 
++#pragma omp parallel for
+    for (Index_t i=0; i<numElem(); ++i) {
+       Real_t x_local[8], y_local[8], z_local[8] ;
+       Index_t *elemToNode = nodelist(i) ;
+@@ -171,6 +165,10 @@
+       Real_t volume = CalcElemVolume(x_local, y_local, z_local );
+       volo(i) = volume ;
+       elemMass(i) = volume ;
++   }
++   for (Index_t i=0; i<numElem(); ++i) {
++      Real_t volume = volo(i) ;
++      Index_t *elemToNode = nodelist(i) ;
+       for (Index_t j=0; j<8; ++j) {
+          Index_t idx = elemToNode[j] ;
+          nodalMass(idx) += volume / Real_t(8.0) ;
+@@ -205,6 +203,9 @@
+      delete [] m_regElemlist[i];
+    }
+    delete [] m_regElemlist;
++   Release(&m_dzz);
++   Release(&m_dyy);
++   Release(&m_dxx);
+    
+ #if USE_MPI
+    delete [] commDataSend;
+@@ -219,35 +220,31 @@
+ {
+   Index_t meshEdgeElems = m_tp*nx ;
+ 
+-  // initialize nodal coordinates 
+-  Index_t nidx = 0 ;
+-  Real_t tz = Real_t(1.125)*Real_t(m_planeLoc*nx)/Real_t(meshEdgeElems) ;
++  // initialize nodal coordinates
++#pragma omp parallel for
+   for (Index_t plane=0; plane<edgeNodes; ++plane) {
+-    Real_t ty = Real_t(1.125)*Real_t(m_rowLoc*nx)/Real_t(meshEdgeElems) ;
++    Real_t tz = Real_t(1.125)*Real_t(m_planeLoc*nx+plane)/Real_t(meshEdgeElems) ;
+     for (Index_t row=0; row<edgeNodes; ++row) {
+-      Real_t tx = Real_t(1.125)*Real_t(m_colLoc*nx)/Real_t(meshEdgeElems) ;
++      Real_t ty = Real_t(1.125)*Real_t(m_rowLoc*nx+row)/Real_t(meshEdgeElems) ;
++      Index_t nidx = (plane*edgeNodes + row)*edgeNodes ;
+       for (Index_t col=0; col<edgeNodes; ++col) {
++	Real_t tx = Real_t(1.125)*Real_t(m_colLoc*nx+col)/Real_t(meshEdgeElems) ;
+ 	x(nidx) = tx ;
+ 	y(nidx) = ty ;
+ 	z(nidx) = tz ;
+ 	++nidx ;
+-	// tx += ds ; // may accumulate roundoff... 
+-	tx = Real_t(1.125)*Real_t(m_colLoc*nx+col+1)/Real_t(meshEdgeElems) ;
+       }
+-      // ty += ds ;  // may accumulate roundoff... 
+-      ty = Real_t(1.125)*Real_t(m_rowLoc*nx+row+1)/Real_t(meshEdgeElems) ;
+     }
+-    // tz += ds ;  // may accumulate roundoff... 
+-    tz = Real_t(1.125)*Real_t(m_planeLoc*nx+plane+1)/Real_t(meshEdgeElems) ;
+   }
+ 
+ 
+-  // embed hexehedral elements in nodal point lattice 
+-  Index_t zidx = 0 ;
+-  nidx = 0 ;
++  // embed hexehedral elements in nodal point lattice
++#pragma omp parallel for
+   for (Index_t plane=0; plane<edgeElems; ++plane) {
+     for (Index_t row=0; row<edgeElems; ++row) {
+       for (Index_t col=0; col<edgeElems; ++col) {
++	Index_t zidx = (plane*edgeElems + row)*edgeElems + col ;
++	Index_t nidx = (plane*edgeNodes + row)*edgeNodes + col ;
+ 	Index_t *localNode = nodelist(zidx) ;
+ 	localNode[0] = nidx                                       ;
+ 	localNode[1] = nidx                                   + 1 ;
+@@ -257,12 +254,8 @@
+ 	localNode[5] = nidx + edgeNodes*edgeNodes             + 1 ;
+ 	localNode[6] = nidx + edgeNodes*edgeNodes + edgeNodes + 1 ;
+ 	localNode[7] = nidx + edgeNodes*edgeNodes + edgeNodes     ;
+-	++zidx ;
+-	++nidx ;
+       }
+-      ++nidx ;
+     }
+-    nidx += edgeNodes ;
+   }
+ }
+ 
+@@ -490,17 +483,26 @@
+       delete [] regBinEnd; 
+    }
+    // Convert regNumList to region index sets
+-   // First, count size of each region 
+-   for (Index_t i=0 ; i<numElem() ; ++i) {
+-      int r = this->regNumList(i)-1; // region index == regnum-1
+-      regElemSize(r)++;
++   // First, count size of each region
++   {
++#pragma omp parallel
++      {
++         std::vector<Index_t> local(numReg(), 0) ;
++#pragma omp for nowait
++         for (Index_t i=0 ; i<numElem() ; ++i) {
++            int r = this->regNumList(i)-1; // region index == regnum-1
++            local[r]++;
++         }
++#pragma omp critical
++         for (Index_t r=0 ; r<numReg() ; ++r) regElemSize(r) += local[r];
++      }
+    }
+    // Second, allocate each region index set
+    for (Index_t i=0 ; i<numReg() ; ++i) {
+       m_regElemlist[i] = new Index_t[regElemSize(i)];
+       regElemSize(i) = 0;
+    }
+-   // Third, fill index sets
++   // Third, fill index sets (serial; preserves element order)
+    for (Index_t i=0 ; i<numElem() ; ++i) {
+       Index_t r = regNumList(i)-1;       // region index == regnum-1
+       Index_t regndx = regElemSize(r)++; // Note increment
+@@ -513,11 +515,12 @@
+ void 
+ Domain::SetupSymmetryPlanes(Int_t edgeNodes)
+ {
+-  Index_t nidx = 0 ;
++#pragma omp parallel for
+   for (Index_t i=0; i<edgeNodes; ++i) {
+     Index_t planeInc = i*edgeNodes*edgeNodes ;
+     Index_t rowInc   = i*edgeNodes ;
+     for (Index_t j=0; j<edgeNodes; ++j) {
++      Index_t nidx = i*edgeNodes + j ;
+       if (m_planeLoc == 0) {
+ 	m_symmZ[nidx] = rowInc   + j ;
+       }
+@@ -527,7 +530,6 @@
+       if (m_colLoc == 0) {
+ 	m_symmX[nidx] = planeInc + j*edgeNodes ;
+       }
+-      ++nidx ;
+     }
+   }
+ }
+@@ -539,25 +541,30 @@
+ Domain::SetupElementConnectivities(Int_t edgeElems)
+ {
+    lxim(0) = 0 ;
++#pragma omp parallel for
+    for (Index_t i=1; i<numElem(); ++i) {
+       lxim(i)   = i-1 ;
+       lxip(i-1) = i ;
+    }
+    lxip(numElem()-1) = numElem()-1 ;
+ 
++#pragma omp parallel for
+    for (Index_t i=0; i<edgeElems; ++i) {
+-      letam(i) = i ; 
++      letam(i) = i ;
+       letap(numElem()-edgeElems+i) = numElem()-edgeElems+i ;
+    }
++#pragma omp parallel for
+    for (Index_t i=edgeElems; i<numElem(); ++i) {
+       letam(i) = i-edgeElems ;
+       letap(i-edgeElems) = i ;
+    }
+ 
++#pragma omp parallel for
+    for (Index_t i=0; i<edgeElems*edgeElems; ++i) {
+       lzetam(i) = i ;
+       lzetap(numElem()-edgeElems*edgeElems+i) = numElem()-edgeElems*edgeElems+i ;
+    }
++#pragma omp parallel for
+    for (Index_t i=edgeElems*edgeElems; i<numElem(); ++i) {
+       lzetam(i) = i - edgeElems*edgeElems ;
+       lzetap(i-edgeElems*edgeElems) = i ;
+@@ -571,6 +578,7 @@
+   Index_t ghostIdx[6] ;  // offsets to ghost locations
+ 
+   // set up boundary condition information
++#pragma omp parallel for
+   for (Index_t i=0; i<numElem(); ++i) {
+      elemBC(i) = Int_t(0) ;
+   }
+--- examples/hpc/lulesh_src/lulesh.h	2026-11-14 17:22:42
++++ runs/lulesh-g1/gen-01/run-1/lulesh.h	2026-11-14 20:51:53
+@@ -20,6 +20,7 @@
+ #include <stdlib.h>
+ #include <stdint.h>
+ #include <vector>
++#include <map>
+ 
+ //**************************************************
+ // Allow flexibility for arithmetic representations 
+@@ -107,17 +108,54 @@
+ /* might want to add access methods so that memory can be */
+ /* better managed, as in luleshFT */
+ 
++// Size-cached scratch allocator: repeated same-size alloc/free pairs
++// (scratch arrays reused every time step) are served from a cache
++// instead of malloc/free each iteration. A size header is stored just
++// before the returned pointer so Release can return it to the right bucket.
++// Size-cached scratch allocator for small temporaries reused each step.
++// Large buffers are not cached (they bloat working set and page traffic).
++namespace alloc_cache {
++   const size_t MAX_BYTES = 512*1024*1024 ;
++   const size_t MAX_TOTAL = 1024*1024*1024 ;
++   const size_t MAX_PER_BUCKET = 2 ;
++   inline std::map<size_t, std::vector<void *> > &cache() { static std::map<size_t, std::vector<void *> > c ; return c ; }
++   inline size_t &total() { static size_t t = 0 ; return t ; }
++}
++
+ template <typename T>
+ T *Allocate(size_t size)
+ {
+-   return static_cast<T *>(malloc(sizeof(T)*size)) ;
++   size_t bytes = sizeof(T)*size ;
++   if (bytes <= alloc_cache::MAX_BYTES) {
++      auto &cache = alloc_cache::cache() ;
++      auto it = cache.find(bytes) ;
++      if (it != cache.end() && !it->second.empty()) {
++         size_t *raw = static_cast<size_t *>(it->second.back()) ;
++         it->second.pop_back() ;
++         alloc_cache::total() -= bytes ;
++         return reinterpret_cast<T *>(raw + 2) ;
++      }
++   }
++   // header holds the byte size so Release can bucket it
++   size_t *raw = static_cast<size_t *>(malloc(bytes + 2*sizeof(size_t))) ;
++   raw[0] = bytes ;
++   return reinterpret_cast<T *>(raw + 2) ;
+ }
+ 
+ template <typename T>
+ void Release(T **ptr)
+ {
+    if (*ptr != NULL) {
+-      free(*ptr) ;
++      size_t *raw = reinterpret_cast<size_t *>(*ptr) - 2 ;
++      size_t bytes = raw[0] ;
++      // cache only small buffers and keep the total bounded
++      auto &bucket = alloc_cache::cache()[bytes] ;
++      if (bytes <= alloc_cache::MAX_BYTES && bucket.size() < alloc_cache::MAX_PER_BUCKET && alloc_cache::total() + bytes <= alloc_cache::MAX_TOTAL) {
++         bucket.push_back(raw) ;
++         alloc_cache::total() += bytes ;
++      } else {
++         free(raw) ;
++      }
+       *ptr = NULL ;
+    }
+ }
+@@ -244,16 +282,16 @@
+ 
+    void AllocateStrains(Int_t numElem)
+    {
+-      m_dxx = Allocate<Real_t>(numElem) ;
+-      m_dyy = Allocate<Real_t>(numElem) ;
+-      m_dzz = Allocate<Real_t>(numElem) ;
++      if (m_dxx == NULL) {
++         m_dxx = Allocate<Real_t>(numElem) ;
++         m_dyy = Allocate<Real_t>(numElem) ;
++         m_dzz = Allocate<Real_t>(numElem) ;
++      }
+    }
+ 
+    void DeallocateStrains()
+    {
+-      Release(&m_dzz) ;
+-      Release(&m_dyy) ;
+-      Release(&m_dxx) ;
++      // no-op: strain arrays are persistent scratch reused each step
+    }
+    
+    //
+@@ -499,9 +537,9 @@
+ 
+    std::vector<Int_t>    m_elemBC ;  /* symmetry/free-surface flags for each elem face */
+ 
+-   Real_t             *m_dxx ;  /* principal strains -- temporary */
+-   Real_t             *m_dyy ;
+-   Real_t             *m_dzz ;
++   Real_t             *m_dxx = NULL ;  /* principal strains -- persistent scratch */
++   Real_t             *m_dyy = NULL ;
++   Real_t             *m_dzz = NULL ;
+ 
+    Real_t             *m_delv_xi ;    /* velocity gradient -- temporary */
+    Real_t             *m_delv_eta ;

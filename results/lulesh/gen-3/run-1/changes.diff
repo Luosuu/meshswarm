@@ -1,0 +1,252 @@
+--- examples/hpc/lulesh_src/lulesh.cc	2026-11-14 17:22:42
++++ runs/lulesh-g3/gen-01/run-1/lulesh.cc	2026-11-15 01:24:18
+@@ -2019,14 +2019,14 @@
+                           Real_t p_cut, Real_t eosvmax,
+                           Index_t length, Index_t *regElemList)
+ {
+-#pragma omp parallel for firstprivate(length)
++#pragma omp for
+    for (Index_t i = 0; i < length ; ++i) {
+       Real_t c1s = Real_t(2.0)/Real_t(3.0) ;
+       bvc[i] = c1s * (compression[i] + Real_t(1.));
+       pbvc[i] = c1s;
+    }
+ 
+-#pragma omp parallel for firstprivate(length, pmin, p_cut, eosvmax)
++#pragma omp for
+    for (Index_t i = 0 ; i < length ; ++i){
+       Index_t ielem = regElemList[i];
+       
+@@ -2059,7 +2059,10 @@
+ {
+    Real_t *pHalfStep = Allocate<Real_t>(length) ;
+ 
+-#pragma omp parallel for firstprivate(length, emin)
++#pragma omp parallel
++   {
++
++#pragma omp for firstprivate(length, emin)
+    for (Index_t i = 0 ; i < length ; ++i) {
+       e_new[i] = e_old[i] - Real_t(0.5) * delvc[i] * (p_old[i] + q_old[i])
+          + Real_t(0.5) * work[i];
+@@ -2072,7 +2075,7 @@
+    CalcPressureForElems(pHalfStep, bvc, pbvc, e_new, compHalfStep, vnewc,
+                         pmin, p_cut, eosvmax, length, regElemList);
+ 
+-#pragma omp parallel for firstprivate(length, rho0)
++#pragma omp for firstprivate(length, rho0)
+    for (Index_t i = 0 ; i < length ; ++i) {
+       Real_t vhalf = Real_t(1.) / (Real_t(1.) + compHalfStep[i]) ;
+ 
+@@ -2097,7 +2100,7 @@
+               - Real_t(4.0)*(pHalfStep[i] + q_new[i])) ;
+    }
+ 
+-#pragma omp parallel for firstprivate(length, emin, e_cut)
++#pragma omp for firstprivate(length, emin, e_cut)
+    for (Index_t i = 0 ; i < length ; ++i) {
+ 
+       e_new[i] += Real_t(0.5) * work[i];
+@@ -2113,7 +2116,7 @@
+    CalcPressureForElems(p_new, bvc, pbvc, e_new, compression, vnewc,
+                         pmin, p_cut, eosvmax, length, regElemList);
+ 
+-#pragma omp parallel for firstprivate(length, rho0, emin, e_cut)
++#pragma omp for firstprivate(length, rho0, emin, e_cut)
+    for (Index_t i = 0 ; i < length ; ++i){
+       const Real_t sixth = Real_t(1.0) / Real_t(6.0) ;
+       Index_t ielem = regElemList[i];
+@@ -2150,7 +2153,7 @@
+    CalcPressureForElems(p_new, bvc, pbvc, e_new, compression, vnewc,
+                         pmin, p_cut, eosvmax, length, regElemList);
+ 
+-#pragma omp parallel for firstprivate(length, rho0, q_cut)
++#pragma omp for firstprivate(length, rho0, q_cut)
+    for (Index_t i = 0 ; i < length ; ++i){
+       Index_t ielem = regElemList[i];
+ 
+@@ -2170,6 +2173,8 @@
+       }
+    }
+ 
++   }
++
+    Release(&pHalfStep) ;
+ 
+    return ;
+@@ -2235,57 +2240,58 @@
+    Real_t *pbvc = Allocate<Real_t>(numElemReg) ;
+  
+    //loop to add load imbalance based on region number 
+-   for(Int_t j = 0; j < rep; j++) {
+-      /* compress data, minimal set */
++   // Hoisted: the gathers and compression factors are identical on every rep,
++   // so compute them once (the rep loop itself is kept - it is the cost model).
+ #pragma omp parallel
+-      {
++   {
+ #pragma omp for nowait firstprivate(numElemReg)
+-         for (Index_t i=0; i<numElemReg; ++i) {
+-            Index_t ielem = regElemList[i];
+-            e_old[i] = domain.e(ielem) ;
+-            delvc[i] = domain.delv(ielem) ;
+-            p_old[i] = domain.p(ielem) ;
+-            q_old[i] = domain.q(ielem) ;
+-            qq_old[i] = domain.qq(ielem) ;
+-            ql_old[i] = domain.ql(ielem) ;
+-         }
++      for (Index_t i=0; i<numElemReg; ++i) {
++         Index_t ielem = regElemList[i];
++         e_old[i] = domain.e(ielem) ;
++         delvc[i] = domain.delv(ielem) ;
++         p_old[i] = domain.p(ielem) ;
++         q_old[i] = domain.q(ielem) ;
++         qq_old[i] = domain.qq(ielem) ;
++         ql_old[i] = domain.ql(ielem) ;
++      }
+ 
+ #pragma omp for firstprivate(numElemReg)
+-         for (Index_t i = 0; i < numElemReg ; ++i) {
+-            Index_t ielem = regElemList[i];
+-            Real_t vchalf ;
+-            compression[i] = Real_t(1.) / vnewc[ielem] - Real_t(1.);
+-            vchalf = vnewc[ielem] - delvc[i] * Real_t(.5);
+-            compHalfStep[i] = Real_t(1.) / vchalf - Real_t(1.);
+-         }
++      for (Index_t i = 0; i < numElemReg ; ++i) {
++         Index_t ielem = regElemList[i];
++         Real_t vchalf ;
++         compression[i] = Real_t(1.) / vnewc[ielem] - Real_t(1.);
++         vchalf = vnewc[ielem] - delvc[i] * Real_t(.5);
++         compHalfStep[i] = Real_t(1.) / vchalf - Real_t(1.);
++      }
+ 
+       /* Check for v > eosvmax or v < eosvmin */
+-         if ( eosvmin != Real_t(0.) ) {
++      if ( eosvmin != Real_t(0.) ) {
+ #pragma omp for nowait firstprivate(numElemReg, eosvmin)
+-            for(Index_t i=0 ; i<numElemReg ; ++i) {
+-               Index_t ielem = regElemList[i];
+-               if (vnewc[ielem] <= eosvmin) { /* impossible due to calling func? */
+-                  compHalfStep[i] = compression[i] ;
+-               }
++         for(Index_t i=0 ; i<numElemReg ; ++i) {
++            Index_t ielem = regElemList[i];
++            if (vnewc[ielem] <= eosvmin) { /* impossible due to calling func? */
++               compHalfStep[i] = compression[i] ;
+             }
+          }
+-         if ( eosvmax != Real_t(0.) ) {
++      }
++      if ( eosvmax != Real_t(0.) ) {
+ #pragma omp for nowait firstprivate(numElemReg, eosvmax)
+-            for(Index_t i=0 ; i<numElemReg ; ++i) {
+-               Index_t ielem = regElemList[i];
+-               if (vnewc[ielem] >= eosvmax) { /* impossible due to calling func? */
+-                  p_old[i]        = Real_t(0.) ;
+-                  compression[i]  = Real_t(0.) ;
+-                  compHalfStep[i] = Real_t(0.) ;
+-               }
++         for(Index_t i=0 ; i<numElemReg ; ++i) {
++            Index_t ielem = regElemList[i];
++            if (vnewc[ielem] >= eosvmax) { /* impossible due to calling func? */
++               p_old[i]        = Real_t(0.) ;
++               compression[i]  = Real_t(0.) ;
++               compHalfStep[i] = Real_t(0.) ;
+             }
+          }
++      }
+ 
+ #pragma omp for nowait firstprivate(numElemReg)
+-         for (Index_t i = 0 ; i < numElemReg ; ++i) {
+-            work[i] = Real_t(0.) ; 
+-         }
++      for (Index_t i = 0 ; i < numElemReg ; ++i) {
++         work[i] = Real_t(0.) ;
+       }
++   }
++   for(Int_t j = 0; j < rep; j++) {
+       CalcEnergyForElems(p_new, e_new, q_new, bvc, pbvc,
+                          p_old, e_old,  q_old, compression, compHalfStep,
+                          vnewc, work,  delvc, pmin,
+--- examples/hpc/lulesh_src/lulesh.h	2026-11-14 17:22:42
++++ runs/lulesh-g3/gen-01/run-1/lulesh.h	2026-11-15 00:29:41
+@@ -107,19 +107,74 @@
+ /* might want to add access methods so that memory can be */
+ /* better managed, as in luleshFT */
+ 
++#include <mutex>
++#include <unordered_map>
++#include <vector>
++
++// Grow-only, size-class cache behind Allocate/Release.
++// Freed blocks are cached (up to a hard byte cap) so repeated
++// per-timestep alloc/release churn is served from cache.
++// A 16-byte header before each block records its padded size class.
++#define LULESH_ALLOC_CACHE_MAX_BYTES (512ull*1024*1024)
++#define LULESH_ALLOC_CACHE_MAX_BLOCKS_PER_CLASS 4096
++#define LULESH_ALLOC_HEADER 16
++
++struct AllocCache {
++   std::mutex mtx ;
++   std::unordered_map<size_t, std::vector<void*> > freeLists ;
++   size_t cachedBytes = 0 ;
++} ;
++
++inline AllocCache & AllocCacheGet()
++{
++   static AllocCache c ;
++   return c ;
++}
++
+ template <typename T>
+ T *Allocate(size_t size)
+ {
+-   return static_cast<T *>(malloc(sizeof(T)*size)) ;
++   size_t bytes = sizeof(T)*size ;
++   if (bytes == 0) bytes = 1 ;
++   size_t classed = (bytes + 15) & ~size_t(15) ;
++   AllocCache &c = AllocCacheGet() ;
++   {
++      std::lock_guard<std::mutex> lock(c.mtx) ;
++      std::unordered_map<size_t, std::vector<void*> >::iterator it = c.freeLists.find(classed) ;
++      if (it != c.freeLists.end() && !it->second.empty()) {
++         void *raw = it->second.back() ;
++         it->second.pop_back() ;
++         c.cachedBytes -= classed ;
++         return reinterpret_cast<T *>(static_cast<char*>(raw) + LULESH_ALLOC_HEADER) ;
++      }
++   }
++   void *raw = malloc(classed + LULESH_ALLOC_HEADER) ;
++   if (raw == NULL) return NULL ;
++   *reinterpret_cast<size_t*>(raw) = classed ;
++   return reinterpret_cast<T *>(static_cast<char*>(raw) + LULESH_ALLOC_HEADER) ;
+ }
+ 
+ template <typename T>
+ void Release(T **ptr)
+ {
+-   if (*ptr != NULL) {
+-      free(*ptr) ;
+-      *ptr = NULL ;
++   if (*ptr == NULL) return ;
++   void *raw = static_cast<void*>(static_cast<char*>(static_cast<void*>(*ptr)) - LULESH_ALLOC_HEADER) ;
++   size_t classed = *reinterpret_cast<size_t*>(raw) ;
++   AllocCache &c = AllocCacheGet() ;
++   bool cached = false ;
++   {
++      std::lock_guard<std::mutex> lock(c.mtx) ;
++      if (c.cachedBytes + classed <= LULESH_ALLOC_CACHE_MAX_BYTES) {
++         std::vector<void*> &fl = c.freeLists[classed] ;
++         if (fl.size() < LULESH_ALLOC_CACHE_MAX_BLOCKS_PER_CLASS) {
++            fl.push_back(raw) ;
++            c.cachedBytes += classed ;
++            cached = true ;
++         }
++      }
+    }
++   if (!cached) free(raw) ;
++   *ptr = NULL ;
+ }
+ 
+ //////////////////////////////////////////////////////

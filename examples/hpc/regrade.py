@@ -33,10 +33,11 @@ async def main() -> int:
     p.add_argument("--kernel", choices=sorted(kernels.KERNELS) + ["lulesh"], required=True)
     p.add_argument("--cores", type=int, default=8)
     p.add_argument("--strip-fast-math", action="store_true")
+    p.add_argument("--args", action="append", help="LULESH only: time these arguments instead of the held-out ones; may be repeated")
     p.add_argument("workspaces", nargs="+")
     a = p.parse_args()
     runner = ShellRunner(json.loads(os.environ.get("MESH_RUN_WRAP", '["bash", "-c"]')), core_sets=core_sets(a.cores, 1))
-    grade = lulesh.make_grader(runner) if a.kernel == "lulesh" else kernels.make_grader(a.kernel, runner)  # one grader: the serial baseline is timed once and shared
+    grade = lulesh.make_grader(runner, test_args=a.args) if a.kernel == "lulesh" else kernels.make_grader(a.kernel, runner)  # one grader: the serial baseline is timed once and shared
     for src in a.workspaces:
         ws = Path(tempfile.mkdtemp(prefix="regrade-", dir=os.environ.get("MESH_RUN_SCRATCH"))) / "ws"
         shutil.copytree(src, ws, ignore=shutil.ignore_patterns(".mesh"))

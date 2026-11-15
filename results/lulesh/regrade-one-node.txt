@@ -1,0 +1,12 @@
+udc-aw34-22c1
+Thread(s) per core:  1
+Core(s) per socket:  20
+Socket(s):           2
+Model name:          Intel(R) Xeon(R) Gold 6248 CPU @ 2.50GHz
+core set 1: [9, 13, 17, 21, 25, 4, 20, 24] (memory regions [0, 1])
+/scratch/fad3ew/meshswarm/runs/lulesh-g1/gen-01/run-1 [no fast-math flags found] -> score 4.0 | speedup 1.56x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (29.54s [29.39-29.66] -> 18.75s [18.63-19.17]; 25.19s [24.97-25.68] -> 16.27s [16.16-16.33])
+/scratch/fad3ew/meshswarm/runs/lulesh-g1/gen-01/run-2 [no fast-math flags found] -> score 4.0 | speedup 1.64x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (29.54s [29.39-29.66] -> 18.66s [18.08-19.01]; 25.19s [24.97-25.68] -> 14.82s [14.78-14.92])
+/scratch/fad3ew/meshswarm/runs/lulesh-g2/gen-01/run-1 [no fast-math flags found] -> score 4.0 | speedup 1.73x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (29.54s [29.39-29.66] -> 17.69s [17.39-17.86]; 25.19s [24.97-25.68] -> 14.09s [14.03-14.11])
+/scratch/fad3ew/meshswarm/runs/lulesh-g2/gen-01/run-2 [no fast-math flags found] -> score 4.0 | speedup 1.64x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (29.54s [29.39-29.66] -> 17.53s [17.29-17.59]; 25.19s [24.97-25.68] -> 15.71s [15.59-15.96])
+/scratch/fad3ew/meshswarm/runs/lulesh-g3/gen-01/run-1 [no fast-math flags found] -> score 5.0 | speedup 1.80x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (29.54s [29.39-29.66] -> 17.32s [17.26-17.95]; 25.19s [24.97-25.68] -> 13.22s [13.19-13.66])
+/scratch/fad3ew/meshswarm/runs/lulesh-g3/gen-01/run-2 [no fast-math flags found] -> score 5.0 | speedup 1.96x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (29.54s [29.39-29.66] -> 15.96s [15.78-16.04]; 25.19s [24.97-25.68] -> 12.15s [12.08-12.17])

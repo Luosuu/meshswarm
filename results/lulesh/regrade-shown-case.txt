@@ -1,0 +1,12 @@
+udc-ba05-29c1
+Thread(s) per core:  1
+Core(s) per socket:  48
+Socket(s):           2
+Model name:          AMD EPYC 9454 48-Core Processor
+core set 1: [36, 37, 38, 39, 40, 41, 61, 65] (memory regions [0, 1])
+/scratch/fad3ew/meshswarm/runs/lulesh-g1/gen-01/run-1 [no fast-math flags found] -> score 4.0 | speedup 1.70x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (6.52s [6.47-6.54] -> 3.85s [3.84-3.91])
+/scratch/fad3ew/meshswarm/runs/lulesh-g1/gen-01/run-2 [no fast-math flags found] -> score 5.0 | speedup 1.84x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (6.52s [6.47-6.54] -> 3.54s [3.50-3.58])
+/scratch/fad3ew/meshswarm/runs/lulesh-g2/gen-01/run-1 [no fast-math flags found] -> score 5.0 | speedup 1.97x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (6.52s [6.47-6.54] -> 3.30s [3.25-3.34])
+/scratch/fad3ew/meshswarm/runs/lulesh-g2/gen-01/run-2 [no fast-math flags found] -> score 5.0 | speedup 1.91x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (6.52s [6.47-6.54] -> 3.40s [3.39-3.42])
+/scratch/fad3ew/meshswarm/runs/lulesh-g3/gen-01/run-1 [no fast-math flags found] -> score 6.0 | speedup 2.29x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (6.52s [6.47-6.54] -> 2.85s [2.83-2.85])
+/scratch/fad3ew/meshswarm/runs/lulesh-g3/gen-01/run-2 [no fast-math flags found] -> score 6.0 | speedup 2.44x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (6.52s [6.47-6.54] -> 2.68s [2.66-2.68])

@@ -1,0 +1,837 @@
+--- examples/hpc/lulesh_src/lulesh.cc	2026-11-14 17:22:42
++++ runs/lulesh-g1/gen-01/run-2/lulesh.cc	2026-11-14 21:02:11
+@@ -160,6 +160,8 @@
+ #endif
+ 
+ #include "lulesh.h"
++#ifdef __GLIBC__
++#endif
+ 
+ /* Work Routines */
+ 
+@@ -512,9 +514,9 @@
+ 
+ 
+   if (numthreads > 1) {
+-     fx_elem = Allocate<Real_t>(numElem8) ;
+-     fy_elem = Allocate<Real_t>(numElem8) ;
+-     fz_elem = Allocate<Real_t>(numElem8) ;
++     fx_elem = domain.GetFxElem8(numElem8) ;
++     fy_elem = domain.GetFyElem8(numElem8) ;
++     fz_elem = domain.GetFzElem8(numElem8) ;
+   }
+   // loop over all elements
+ 
+@@ -580,9 +582,7 @@
+         domain.fy(gnode) = fy_tmp ;
+         domain.fz(gnode) = fz_tmp ;
+      }
+-     Release(&fz_elem) ;
+-     Release(&fy_elem) ;
+-     Release(&fx_elem) ;
++     domain.ReleaseFX8() ;
+   }
+ }
+ 
+@@ -735,9 +735,9 @@
+    Real_t *fz_elem; 
+ 
+    if(numthreads > 1) {
+-      fx_elem = Allocate<Real_t>(numElem8) ;
+-      fy_elem = Allocate<Real_t>(numElem8) ;
+-      fz_elem = Allocate<Real_t>(numElem8) ;
++      fx_elem = domain.GetFxElem8(numElem8) ;
++      fy_elem = domain.GetFyElem8(numElem8) ;
++      fz_elem = domain.GetFzElem8(numElem8) ;
+    }
+ 
+    Real_t  gamma[4][8];
+@@ -984,9 +984,7 @@
+          domain.fy(gnode) += fy_tmp ;
+          domain.fz(gnode) += fz_tmp ;
+       }
+-      Release(&fz_elem) ;
+-      Release(&fy_elem) ;
+-      Release(&fx_elem) ;
++      domain.ReleaseFX8() ;
+    }
+ }
+ 
+@@ -998,12 +996,12 @@
+ {
+    Index_t numElem = domain.numElem() ;
+    Index_t numElem8 = numElem * 8 ;
+-   Real_t *dvdx = Allocate<Real_t>(numElem8) ;
+-   Real_t *dvdy = Allocate<Real_t>(numElem8) ;
+-   Real_t *dvdz = Allocate<Real_t>(numElem8) ;
+-   Real_t *x8n  = Allocate<Real_t>(numElem8) ;
+-   Real_t *y8n  = Allocate<Real_t>(numElem8) ;
+-   Real_t *z8n  = Allocate<Real_t>(numElem8) ;
++   Real_t *dvdx = domain.GetDvdx8((size_t)numElem8) ;
++   Real_t *dvdy = domain.GetDvdy8((size_t)numElem8) ;
++   Real_t *dvdz = domain.GetDvdz8((size_t)numElem8) ;
++   Real_t *x8n  = domain.GetX8n((size_t)numElem8) ;
++   Real_t *y8n  = domain.GetY8n((size_t)numElem8) ;
++   Real_t *z8n  = domain.GetZ8n((size_t)numElem8) ;
+ 
+    /* start loop over elements */
+ #pragma omp parallel for firstprivate(numElem)
+@@ -1046,12 +1044,7 @@
+                                     hgcoef, numElem, domain.numNode()) ;
+    }
+ 
+-   Release(&z8n) ;
+-   Release(&y8n) ;
+-   Release(&x8n) ;
+-   Release(&dvdz) ;
+-   Release(&dvdy) ;
+-   Release(&dvdx) ;
++   /* buffers kept cached on Domain */
+ 
+    return ;
+ }
+@@ -1064,10 +1057,10 @@
+    Index_t numElem = domain.numElem() ;
+    if (numElem != 0) {
+       Real_t  hgcoef = domain.hgcoef() ;
+-      Real_t *sigxx  = Allocate<Real_t>(numElem) ;
+-      Real_t *sigyy  = Allocate<Real_t>(numElem) ;
+-      Real_t *sigzz  = Allocate<Real_t>(numElem) ;
+-      Real_t *determ = Allocate<Real_t>(numElem) ;
++      Real_t *sigxx  = domain.GetSigxx(numElem) ;
++      Real_t *sigyy  = domain.GetSigyy(numElem) ;
++      Real_t *sigzz  = domain.GetSigzz(numElem) ;
++      Real_t *determ = domain.GetDeterm(numElem) ;
+ 
+       /* Sum contributions to total stress tensor */
+       InitStressTermsForElems(domain, sigxx, sigyy, sigzz, numElem);
+@@ -1091,11 +1084,6 @@
+       }
+ 
+       CalcHourglassControlForElems(domain, determ, hgcoef) ;
+-
+-      Release(&determ) ;
+-      Release(&sigzz) ;
+-      Release(&sigyy) ;
+-      Release(&sigxx) ;
+    }
+ }
+ 
+@@ -2019,17 +2007,13 @@
+                           Real_t p_cut, Real_t eosvmax,
+                           Index_t length, Index_t *regElemList)
+ {
+-#pragma omp parallel for firstprivate(length)
++#pragma omp parallel for firstprivate(length, pmin, p_cut, eosvmax)
+    for (Index_t i = 0; i < length ; ++i) {
+-      Real_t c1s = Real_t(2.0)/Real_t(3.0) ;
++      const Real_t c1s = Real_t(2.0)/Real_t(3.0) ;
+       bvc[i] = c1s * (compression[i] + Real_t(1.));
+       pbvc[i] = c1s;
+-   }
+-
+-#pragma omp parallel for firstprivate(length, pmin, p_cut, eosvmax)
+-   for (Index_t i = 0 ; i < length ; ++i){
+       Index_t ielem = regElemList[i];
+-      
++
+       p_new[i] = bvc[i] * e_old[i] ;
+ 
+       if    (FABS(p_new[i]) <  p_cut   )
+@@ -2050,19 +2034,20 @@
+                         Real_t* bvc, Real_t* pbvc,
+                         Real_t* p_old, Real_t* e_old, Real_t* q_old,
+                         Real_t* compression, Real_t* compHalfStep,
+-                        Real_t* vnewc, Real_t* work, Real_t* delvc, Real_t pmin,
++                        Real_t* vnewc, Real_t* delvc, Real_t pmin,
+                         Real_t p_cut, Real_t  e_cut, Real_t q_cut, Real_t emin,
+                         Real_t* qq_old, Real_t* ql_old,
+                         Real_t rho0,
+                         Real_t eosvmax,
+                         Index_t length, Index_t *regElemList)
+ {
+-   Real_t *pHalfStep = Allocate<Real_t>(length) ;
++   static Real_t *pHalfStep = NULL ;
++   static size_t pHalfStepCap = 0 ;
++   if (pHalfStepCap < (size_t)length) { Release(&pHalfStep); pHalfStep = Allocate<Real_t>(length) ; pHalfStepCap = length ; }
+ 
+ #pragma omp parallel for firstprivate(length, emin)
+    for (Index_t i = 0 ; i < length ; ++i) {
+-      e_new[i] = e_old[i] - Real_t(0.5) * delvc[i] * (p_old[i] + q_old[i])
+-         + Real_t(0.5) * work[i];
++      e_new[i] = e_old[i] - Real_t(0.5) * delvc[i] * (p_old[i] + q_old[i]);
+ 
+       if (e_new[i]  < emin ) {
+          e_new[i] = emin ;
+@@ -2100,8 +2085,6 @@
+ #pragma omp parallel for firstprivate(length, emin, e_cut)
+    for (Index_t i = 0 ; i < length ; ++i) {
+ 
+-      e_new[i] += Real_t(0.5) * work[i];
+-
+       if (FABS(e_new[i]) < e_cut) {
+          e_new[i] = Real_t(0.)  ;
+       }
+@@ -2123,8 +2106,9 @@
+          q_tilde = Real_t(0.) ;
+       }
+       else {
++         const Real_t ve = vnewc[ielem];
+          Real_t ssc = ( pbvc[i] * e_new[i]
+-                 + vnewc[ielem] * vnewc[ielem] * bvc[i] * p_new[i] ) / rho0 ;
++                 + ve * ve * bvc[i] * p_new[i] ) / rho0 ;
+ 
+          if ( ssc <= Real_t(.1111111e-36) ) {
+             ssc = Real_t(.3333333e-18) ;
+@@ -2155,8 +2139,9 @@
+       Index_t ielem = regElemList[i];
+ 
+       if ( delvc[i] <= Real_t(0.) ) {
++         const Real_t ve = vnewc[ielem];
+          Real_t ssc = ( pbvc[i] * e_new[i]
+-                 + vnewc[ielem] * vnewc[ielem] * bvc[i] * p_new[i] ) / rho0 ;
++                 + ve * ve * bvc[i] * p_new[i] ) / rho0 ;
+ 
+          if ( ssc <= Real_t(.1111111e-36) ) {
+             ssc = Real_t(.3333333e-18) ;
+@@ -2170,8 +2155,6 @@
+       }
+    }
+ 
+-   Release(&pHalfStep) ;
+-
+    return ;
+ }
+ 
+@@ -2187,7 +2170,8 @@
+ #pragma omp parallel for firstprivate(rho0, ss4o3)
+    for (Index_t i = 0; i < len ; ++i) {
+       Index_t ielem = regElemList[i];
+-      Real_t ssTmp = (pbvc[i] * enewc[i] + vnewc[ielem] * vnewc[ielem] *
++      const Real_t ve = vnewc[ielem];
++      Real_t ssTmp = (pbvc[i] * enewc[i] + ve * ve *
+                  bvc[i] * pnewc[i]) / rho0;
+       if (ssTmp <= Real_t(.1111111e-36)) {
+          ssTmp = Real_t(.3333333e-18);
+@@ -2219,20 +2203,27 @@
+    // These temporaries will be of different size for 
+    // each call (due to different sized region element
+    // lists)
+-   Real_t *e_old = Allocate<Real_t>(numElemReg) ;
+-   Real_t *delvc = Allocate<Real_t>(numElemReg) ;
+-   Real_t *p_old = Allocate<Real_t>(numElemReg) ;
+-   Real_t *q_old = Allocate<Real_t>(numElemReg) ;
+-   Real_t *compression = Allocate<Real_t>(numElemReg) ;
+-   Real_t *compHalfStep = Allocate<Real_t>(numElemReg) ;
+-   Real_t *qq_old = Allocate<Real_t>(numElemReg) ;
+-   Real_t *ql_old = Allocate<Real_t>(numElemReg) ;
+-   Real_t *work = Allocate<Real_t>(numElemReg) ;
+-   Real_t *p_new = Allocate<Real_t>(numElemReg) ;
+-   Real_t *e_new = Allocate<Real_t>(numElemReg) ;
+-   Real_t *q_new = Allocate<Real_t>(numElemReg) ;
+-   Real_t *bvc = Allocate<Real_t>(numElemReg) ;
+-   Real_t *pbvc = Allocate<Real_t>(numElemReg) ;
++   static Real_t* eos_buf = NULL ;
++   static size_t eos_cap = 0 ;
++   if (eos_cap < (size_t)numElemReg * 14) {
++      Release(&eos_buf) ;
++      eos_buf = Allocate<Real_t>((size_t)numElemReg * 14) ;
++      eos_cap = (size_t)numElemReg * 14 ;
++   }
++   Real_t *p = eos_buf ;
++   Real_t *e_old = p ; p += numElemReg ;
++   Real_t *delvc = p ; p += numElemReg ;
++   Real_t *p_old = p ; p += numElemReg ;
++   Real_t *q_old = p ; p += numElemReg ;
++   Real_t *compression = p ; p += numElemReg ;
++   Real_t *compHalfStep = p ; p += numElemReg ;
++   Real_t *qq_old = p ; p += numElemReg ;
++   Real_t *ql_old = p ; p += numElemReg ;
++   Real_t *p_new = p ; p += numElemReg ;
++   Real_t *e_new = p ; p += numElemReg ;
++   Real_t *q_new = p ; p += numElemReg ;
++   Real_t *bvc = p ; p += numElemReg ;
++   Real_t *pbvc = p ; p += numElemReg ;
+  
+    //loop to add load imbalance based on region number 
+    for(Int_t j = 0; j < rep; j++) {
+@@ -2280,15 +2271,10 @@
+                }
+             }
+          }
+-
+-#pragma omp for nowait firstprivate(numElemReg)
+-         for (Index_t i = 0 ; i < numElemReg ; ++i) {
+-            work[i] = Real_t(0.) ; 
+-         }
+       }
+       CalcEnergyForElems(p_new, e_new, q_new, bvc, pbvc,
+                          p_old, e_old,  q_old, compression, compHalfStep,
+-                         vnewc, work,  delvc, pmin,
++                         vnewc, delvc, pmin,
+                          p_cut, e_cut, q_cut, emin,
+                          qq_old, ql_old, rho0, eosvmax,
+                          numElemReg, regElemList);
+@@ -2306,21 +2292,6 @@
+                           vnewc, rho0, e_new, p_new,
+                           pbvc, bvc, ss4o3,
+                           numElemReg, regElemList) ;
+-
+-   Release(&pbvc) ;
+-   Release(&bvc) ;
+-   Release(&q_new) ;
+-   Release(&e_new) ;
+-   Release(&p_new) ;
+-   Release(&work) ;
+-   Release(&ql_old) ;
+-   Release(&qq_old) ;
+-   Release(&compHalfStep) ;
+-   Release(&compression) ;
+-   Release(&q_old) ;
+-   Release(&p_old) ;
+-   Release(&delvc) ;
+-   Release(&e_old) ;
+ }
+ 
+ /******************************************/
+--- examples/hpc/lulesh_src/lulesh-init.cc	2026-11-14 17:22:42
++++ runs/lulesh-g1/gen-01/run-2/lulesh-init.cc	2026-11-14 20:00:39
+@@ -86,32 +86,24 @@
+ 
+    SetupCommBuffers(edgeNodes);
+ 
+-   // Basic Field Initialization 
++   // Basic Field Initialization
++#pragma omp parallel for schedule(static)
+    for (Index_t i=0; i<numElem(); ++i) {
+       e(i) =  Real_t(0.0) ;
+       p(i) =  Real_t(0.0) ;
+       q(i) =  Real_t(0.0) ;
+       ss(i) = Real_t(0.0) ;
+-   }
+-
+-   // Note - v initializes to 1.0, not 0.0!
+-   for (Index_t i=0; i<numElem(); ++i) {
+       v(i) = Real_t(1.0) ;
+    }
+ 
++#pragma omp parallel for schedule(static)
+    for (Index_t i=0; i<numNode(); ++i) {
+       xd(i) = Real_t(0.0) ;
+       yd(i) = Real_t(0.0) ;
+       zd(i) = Real_t(0.0) ;
+-   }
+-
+-   for (Index_t i=0; i<numNode(); ++i) {
+       xdd(i) = Real_t(0.0) ;
+       ydd(i) = Real_t(0.0) ;
+       zdd(i) = Real_t(0.0) ;
+-   }
+-
+-   for (Index_t i=0; i<numNode(); ++i) {
+       nodalMass(i) = Real_t(0.0) ;
+    }
+ 
+@@ -155,7 +147,8 @@
+    time()    = Real_t(0.) ;
+    cycle()   = Int_t(0) ;
+ 
+-   // initialize field data 
++   // initialize field data
++#pragma omp parallel for schedule(static)
+    for (Index_t i=0; i<numElem(); ++i) {
+       Real_t x_local[8], y_local[8], z_local[8] ;
+       Index_t *elemToNode = nodelist(i) ;
+@@ -171,11 +164,38 @@
+       Real_t volume = CalcElemVolume(x_local, y_local, z_local );
+       volo(i) = volume ;
+       elemMass(i) = volume ;
+-      for (Index_t j=0; j<8; ++j) {
+-         Index_t idx = elemToNode[j] ;
+-         nodalMass(idx) += volume / Real_t(8.0) ;
++   }
++
++   // deposit element mass onto nodes; per-node loop over the (element-ordered)
++   // corner list preserves the serial summation order exactly
++#if _OPENMP
++   Index_t numthreadsSetup = omp_get_max_threads();
++#else
++   Index_t numthreadsSetup = 1;
++#endif
++   if (numthreadsSetup > 1) {
++#pragma omp parallel for schedule(static)
++      for (Index_t i=0; i<numNode(); ++i) {
++         Index_t count = nodeElemCount(i) ;
++         Index_t *cornerList = nodeElemCornerList(i) ;
++         Real_t msum = Real_t(0.0) ;
++         for (Index_t j=0 ; j < count ; ++j) {
++            Index_t ielem = cornerList[j] >> 3 ;  // corner list stores 8*elem + corner
++            msum += volo(ielem) / Real_t(8.0) ;
++         }
++         nodalMass(i) = msum ;
+       }
+    }
++   else {
++      for (Index_t i=0; i<numElem(); ++i) {
++         Index_t *elemToNode = nodelist(i) ;
++         Real_t volume = volo(i) ;
++         for (Index_t j=0; j<8; ++j) {
++            Index_t idx = elemToNode[j] ;
++            nodalMass(idx) += volume / Real_t(8.0) ;
++         }
++      }
++   }
+ 
+    // deposit initial energy
+    // An energy of 3.948746e+7 is correct for a problem with
+@@ -197,6 +217,13 @@
+ ////////////////////////////////////////////////////////////////////////////////
+ Domain::~Domain()
+ {
++   Release(&m_dxx); Release(&m_dyy); Release(&m_dzz);
++   Release(&m_delv_xi); Release(&m_delv_eta); Release(&m_delv_zeta);
++   Release(&m_fx8); Release(&m_fy8); Release(&m_fz8);
++   Release(&m_delx_xi); Release(&m_delx_eta); Release(&m_delx_zeta);
++   Release(&m_sigxx); Release(&m_sigyy); Release(&m_sigzz); Release(&m_determ);
++   Release(&m_dvdx8); Release(&m_dvdy8); Release(&m_dvdz8);
++   Release(&m_x8n); Release(&m_y8n); Release(&m_z8n);
+    delete [] m_regNumList;
+    delete [] m_nodeElemStart;
+    delete [] m_nodeElemCornerList;
+@@ -219,35 +246,29 @@
+ {
+   Index_t meshEdgeElems = m_tp*nx ;
+ 
+-  // initialize nodal coordinates 
+-  Index_t nidx = 0 ;
+-  Real_t tz = Real_t(1.125)*Real_t(m_planeLoc*nx)/Real_t(meshEdgeElems) ;
+-  for (Index_t plane=0; plane<edgeNodes; ++plane) {
+-    Real_t ty = Real_t(1.125)*Real_t(m_rowLoc*nx)/Real_t(meshEdgeElems) ;
++  // initialize nodal coordinates
++#pragma omp parallel for schedule(static)
++  for (Index_t plane=0; plane<edgeNodes; ++plane) {
++    const Real_t tz = Real_t(1.125)*Real_t(m_planeLoc*nx+plane)/Real_t(meshEdgeElems) ;
+     for (Index_t row=0; row<edgeNodes; ++row) {
+-      Real_t tx = Real_t(1.125)*Real_t(m_colLoc*nx)/Real_t(meshEdgeElems) ;
++      const Real_t ty = Real_t(1.125)*Real_t(m_rowLoc*nx+row)/Real_t(meshEdgeElems) ;
+       for (Index_t col=0; col<edgeNodes; ++col) {
+-	x(nidx) = tx ;
++	const Index_t nidx = plane*edgeNodes*edgeNodes + row*edgeNodes + col ;
++	x(nidx) = Real_t(1.125)*Real_t(m_colLoc*nx+col)/Real_t(meshEdgeElems) ;
+ 	y(nidx) = ty ;
+ 	z(nidx) = tz ;
+-	++nidx ;
+-	// tx += ds ; // may accumulate roundoff... 
+-	tx = Real_t(1.125)*Real_t(m_colLoc*nx+col+1)/Real_t(meshEdgeElems) ;
+       }
+-      // ty += ds ;  // may accumulate roundoff... 
+-      ty = Real_t(1.125)*Real_t(m_rowLoc*nx+row+1)/Real_t(meshEdgeElems) ;
+     }
+-    // tz += ds ;  // may accumulate roundoff... 
+-    tz = Real_t(1.125)*Real_t(m_planeLoc*nx+plane+1)/Real_t(meshEdgeElems) ;
+   }
+ 
+ 
+-  // embed hexehedral elements in nodal point lattice 
+-  Index_t zidx = 0 ;
+-  nidx = 0 ;
++  // embed hexehedral elements in nodal point lattice
++#pragma omp parallel for schedule(static)
+   for (Index_t plane=0; plane<edgeElems; ++plane) {
+     for (Index_t row=0; row<edgeElems; ++row) {
+       for (Index_t col=0; col<edgeElems; ++col) {
++	const Index_t zidx = plane*edgeElems*edgeElems + row*edgeElems + col ;
++	const Index_t nidx = plane*edgeNodes*edgeNodes + row*edgeNodes + col ;
+ 	Index_t *localNode = nodelist(zidx) ;
+ 	localNode[0] = nidx                                       ;
+ 	localNode[1] = nidx                                   + 1 ;
+@@ -257,12 +278,8 @@
+ 	localNode[5] = nidx + edgeNodes*edgeNodes             + 1 ;
+ 	localNode[6] = nidx + edgeNodes*edgeNodes + edgeNodes + 1 ;
+ 	localNode[7] = nidx + edgeNodes*edgeNodes + edgeNodes     ;
+-	++zidx ;
+-	++nidx ;
+       }
+-      ++nidx ;
+     }
+-    nidx += edgeNodes ;
+   }
+ }
+ 
+@@ -278,16 +295,20 @@
+ #endif
+ 
+   if (numthreads > 1) {
+-    // set up node-centered indexing of elements 
++    // set up node-centered indexing of elements
+     Index_t *nodeElemCount = new Index_t[numNode()] ;
+ 
++#pragma omp parallel for schedule(static)
+     for (Index_t i=0; i<numNode(); ++i) {
+       nodeElemCount[i] = 0 ;
+     }
+ 
++    // count corner entries per node; atomics keep it parallel and exact
++#pragma omp parallel for schedule(static)
+     for (Index_t i=0; i<numElem(); ++i) {
+       Index_t *nl = nodelist(i) ;
+       for (Index_t j=0; j < 8; ++j) {
++	#pragma omp atomic
+ 	++(nodeElemCount[nl[j]] );
+       }
+     }
+@@ -303,18 +324,20 @@
+        
+     m_nodeElemCornerList = new Index_t[m_nodeElemStart[numNode()]];
+ 
++#pragma omp parallel for schedule(static)
+     for (Index_t i=0; i < numNode(); ++i) {
+       nodeElemCount[i] = 0;
+     }
+ 
++    // fill corner list in element order per node to keep deterministic layout
+     for (Index_t i=0; i < numElem(); ++i) {
+       Index_t *nl = nodelist(i) ;
+       for (Index_t j=0; j < 8; ++j) {
+ 	Index_t m = nl[j];
+ 	Index_t k = i*8 + j ;
+ 	Index_t offset = m_nodeElemStart[m] + nodeElemCount[m] ;
++	nodeElemCount[m] = nodeElemCount[m] + 1 ;
+ 	m_nodeElemCornerList[offset] = k;
+-	++(nodeElemCount[m]) ;
+       }
+     }
+ 
+@@ -490,9 +513,11 @@
+       delete [] regBinEnd; 
+    }
+    // Convert regNumList to region index sets
+-   // First, count size of each region 
++   // First, count size of each region
++   #pragma omp parallel for schedule(static)
+    for (Index_t i=0 ; i<numElem() ; ++i) {
+       int r = this->regNumList(i)-1; // region index == regnum-1
++      #pragma omp atomic
+       regElemSize(r)++;
+    }
+    // Second, allocate each region index set
+@@ -500,7 +525,8 @@
+       m_regElemlist[i] = new Index_t[regElemSize(i)];
+       regElemSize(i) = 0;
+    }
+-   // Third, fill index sets
++   // Third, fill index sets. Each region's list must end up in increasing
++   // element order. Do this serially to preserve exact element order.
+    for (Index_t i=0 ; i<numElem() ; ++i) {
+       Index_t r = regNumList(i)-1;       // region index == regnum-1
+       Index_t regndx = regElemSize(r)++; // Note increment
+@@ -513,11 +539,12 @@
+ void 
+ Domain::SetupSymmetryPlanes(Int_t edgeNodes)
+ {
+-  Index_t nidx = 0 ;
++#pragma omp parallel for schedule(static) collapse(2)
+   for (Index_t i=0; i<edgeNodes; ++i) {
+     Index_t planeInc = i*edgeNodes*edgeNodes ;
+     Index_t rowInc   = i*edgeNodes ;
+     for (Index_t j=0; j<edgeNodes; ++j) {
++      const Index_t nidx = i*edgeNodes + j ;
+       if (m_planeLoc == 0) {
+ 	m_symmZ[nidx] = rowInc   + j ;
+       }
+@@ -527,7 +554,6 @@
+       if (m_colLoc == 0) {
+ 	m_symmX[nidx] = planeInc + j*edgeNodes ;
+       }
+-      ++nidx ;
+     }
+   }
+ }
+@@ -539,25 +565,30 @@
+ Domain::SetupElementConnectivities(Int_t edgeElems)
+ {
+    lxim(0) = 0 ;
++   #pragma omp parallel for schedule(static)
+    for (Index_t i=1; i<numElem(); ++i) {
+       lxim(i)   = i-1 ;
+       lxip(i-1) = i ;
+    }
+    lxip(numElem()-1) = numElem()-1 ;
+ 
++   #pragma omp parallel for schedule(static)
+    for (Index_t i=0; i<edgeElems; ++i) {
+-      letam(i) = i ; 
++      letam(i) = i ;
+       letap(numElem()-edgeElems+i) = numElem()-edgeElems+i ;
+    }
++   #pragma omp parallel for schedule(static)
+    for (Index_t i=edgeElems; i<numElem(); ++i) {
+       letam(i) = i-edgeElems ;
+       letap(i-edgeElems) = i ;
+    }
+ 
++   #pragma omp parallel for schedule(static)
+    for (Index_t i=0; i<edgeElems*edgeElems; ++i) {
+       lzetam(i) = i ;
+       lzetap(numElem()-edgeElems*edgeElems+i) = numElem()-edgeElems*edgeElems+i ;
+    }
++   #pragma omp parallel for schedule(static)
+    for (Index_t i=edgeElems*edgeElems; i<numElem(); ++i) {
+       lzetam(i) = i - edgeElems*edgeElems ;
+       lzetap(i-edgeElems*edgeElems) = i ;
+@@ -571,6 +602,7 @@
+   Index_t ghostIdx[6] ;  // offsets to ghost locations
+ 
+   // set up boundary condition information
++  #pragma omp parallel for schedule(static)
+   for (Index_t i=0; i<numElem(); ++i) {
+      elemBC(i) = Int_t(0) ;
+   }
+@@ -609,7 +641,8 @@
+     ghostIdx[5] = pidx ;
+   }
+ 
+-  // symmetry plane or free surface BCs 
++  // symmetry plane or free surface BCs
++  #pragma omp parallel for schedule(static)
+   for (Index_t i=0; i<edgeElems; ++i) {
+     Index_t planeInc = i*edgeElems*edgeElems ;
+     Index_t rowInc   = i*edgeElems ;
+--- examples/hpc/lulesh_src/lulesh.h	2026-11-14 17:22:42
++++ runs/lulesh-g1/gen-01/run-2/lulesh.h	2026-11-14 20:38:04
+@@ -107,17 +107,75 @@
+ /* might want to add access methods so that memory can be */
+ /* better managed, as in luleshFT */
+ 
++/* Simple reusable scratch allocator: caches freed blocks by size to avoid
++ * repeated large malloc/free per timestep. Falls back to malloc for new sizes. */
++struct ScratchCache {
++   static const size_t kMaxCached = 1u << 31 ;  /* 2 GB cap */
++   static const size_t kHeader = 16 ;
++   struct Node { Node* next ; size_t size ; } ;
++   Node* lists[65] ;
++   size_t cachedBytes ;
++   ScratchCache() : cachedBytes(0) { for (int i = 0; i < 65; i++) lists[i] = NULL ; }
++   static int sizeClass(size_t bytes) {
++      int c = 0 ;
++      size_t b = bytes ;
++      while (b > 1) { b >>= 1 ; c++ ; }
++      return c + 1 ; /* 1..64 */
++   }
++} ;
++inline ScratchCache& ScratchCacheInstance() {
++   static ScratchCache cache ;
++   return cache ;
++}
++inline void* ScratchAlloc(size_t bytes) {
++   ScratchCache& cache = ScratchCacheInstance() ;
++   int cls = ScratchCache::sizeClass(bytes) ;
++   ScratchCache::Node* n = cache.lists[cls] ;
++   while (n) {
++      if (n->size >= bytes) {
++         /* pop */
++         cache.lists[cls] = n->next ;
++         cache.cachedBytes -= n->size ;
++         void* p = reinterpret_cast<char*>(n) + ScratchCache::kHeader ;
++         /* store actual requested size for perfect reuse bookkeeping */
++         reinterpret_cast<size_t*>(p)[-1] = bytes ;
++         return p ;
++      }
++      n = n->next ;
++   }
++   char* raw = static_cast<char*>(malloc(bytes + ScratchCache::kHeader)) ;
++   if (!raw) return NULL ;
++   reinterpret_cast<size_t*>(raw + 0)[0] = bytes ;
++   reinterpret_cast<size_t*>(raw + 8)[0] = 0 ;
++   return raw + ScratchCache::kHeader ;
++}
++inline void ScratchRelease(void* ptr) {
++   ScratchCache& cache = ScratchCacheInstance() ;
++   char* raw = static_cast<char*>(ptr) - ScratchCache::kHeader ;
++   size_t bytes = reinterpret_cast<size_t*>(raw)[0] ;
++   if (cache.cachedBytes + bytes <= ScratchCache::kMaxCached) {
++      int cls = ScratchCache::sizeClass(bytes) ;
++      ScratchCache::Node* n = reinterpret_cast<ScratchCache::Node*>(raw) ;
++      n->size = bytes ;
++      n->next = cache.lists[cls] ;
++      cache.lists[cls] = n ;
++      cache.cachedBytes += bytes ;
++   } else {
++      free(raw) ;
++   }
++}
++
+ template <typename T>
+ T *Allocate(size_t size)
+ {
+-   return static_cast<T *>(malloc(sizeof(T)*size)) ;
++   return static_cast<T *>(ScratchAlloc(sizeof(T)*size)) ;
+ }
+ 
+ template <typename T>
+ void Release(T **ptr)
+ {
+    if (*ptr != NULL) {
+-      free(*ptr) ;
++      ScratchRelease(*ptr) ;
+       *ptr = NULL ;
+    }
+ }
+@@ -221,40 +279,100 @@
+    void AllocateGradients(Int_t numElem, Int_t allElem)
+    {
+       // Position gradients
+-      m_delx_xi   = Allocate<Real_t>(numElem) ;
+-      m_delx_eta  = Allocate<Real_t>(numElem) ;
+-      m_delx_zeta = Allocate<Real_t>(numElem) ;
++      if (m_delx_xi == NULL || m_delxSize < (size_t)numElem) {
++         Release(&m_delx_xi); Release(&m_delx_eta); Release(&m_delx_zeta);
++         m_delx_xi = Allocate<Real_t>(numElem) ;
++         m_delx_eta = Allocate<Real_t>(numElem) ;
++         m_delx_zeta = Allocate<Real_t>(numElem) ;
++         m_delxSize = numElem ;
++      }
+ 
+       // Velocity gradients
+-      m_delv_xi   = Allocate<Real_t>(allElem) ;
+-      m_delv_eta  = Allocate<Real_t>(allElem);
+-      m_delv_zeta = Allocate<Real_t>(allElem) ;
++      if (m_delv_xi == NULL || m_delvSize < (size_t)allElem) {
++         Release(&m_delv_xi); Release(&m_delv_eta); Release(&m_delv_zeta);
++         m_delv_xi = Allocate<Real_t>(allElem) ;
++         m_delv_eta = Allocate<Real_t>(allElem);
++         m_delv_zeta = Allocate<Real_t>(allElem) ;
++         m_delvSize = allElem ;
++      }
+    }
+ 
+    void DeallocateGradients()
+    {
+-      Release(&m_delx_zeta);
+-      Release(&m_delx_eta) ;
+-      Release(&m_delx_xi)  ;
+-
+-      Release(&m_delv_zeta);
+-      Release(&m_delv_eta) ;
+-      Release(&m_delv_xi)  ;
++      /* keep buffers cached for reuse; released in destructor */
+    }
+ 
+    void AllocateStrains(Int_t numElem)
+    {
+-      m_dxx = Allocate<Real_t>(numElem) ;
+-      m_dyy = Allocate<Real_t>(numElem) ;
+-      m_dzz = Allocate<Real_t>(numElem) ;
++      if (m_dxx == NULL || m_strainSize < (size_t)numElem) {
++         Release(&m_dxx); Release(&m_dyy); Release(&m_dzz);
++         m_dxx = Allocate<Real_t>(numElem) ;
++         m_dyy = Allocate<Real_t>(numElem) ;
++         m_dzz = Allocate<Real_t>(numElem) ;
++         m_strainSize = numElem ;
++      }
+    }
+ 
+    void DeallocateStrains()
+    {
+-      Release(&m_dzz) ;
+-      Release(&m_dyy) ;
+-      Release(&m_dxx) ;
++      /* keep buffers cached for reuse; released in destructor */
+    }
++
++   Real_t* GetSigxx(Int_t numElem) { EnsureSig(numElem); return m_sigxx ; }
++   Real_t* GetSigyy(Int_t numElem) { EnsureSig(numElem); return m_sigyy ; }
++   Real_t* GetSigzz(Int_t numElem) { EnsureSig(numElem); return m_sigzz ; }
++   Real_t* GetDeterm(Int_t numElem) { EnsureSig(numElem); return m_determ ; }
++   void ReleaseSig() { } /* keep cached */
++
++   Real_t* GetFxElem8(size_t n) { EnsureFX8(n); return m_fx8 ; }
++   Real_t* GetFyElem8(size_t n) { EnsureFX8(n); return m_fy8 ; }
++   Real_t* GetFzElem8(size_t n) { EnsureFX8(n); return m_fz8 ; }
++   void ReleaseFX8() { } /* keep cached */
++
++   Real_t* GetDvdx8(size_t n) { EnsureHG8(n); return m_dvdx8 ; }
++   Real_t* GetDvdy8(size_t n) { EnsureHG8(n); return m_dvdy8 ; }
++   Real_t* GetDvdz8(size_t n) { EnsureHG8(n); return m_dvdz8 ; }
++   Real_t* GetX8n(size_t n)   { EnsureHG8(n); return m_x8n ; }
++   Real_t* GetY8n(size_t n)   { EnsureHG8(n); return m_y8n ; }
++   Real_t* GetZ8n(size_t n)   { EnsureHG8(n); return m_z8n ; }
++
++private:
++   void EnsureFX8(size_t n) {
++      if (n > m_fx8Size) {
++         Release(&m_fx8); Release(&m_fy8); Release(&m_fz8);
++         m_fx8 = Allocate<Real_t>(n) ;
++         m_fy8 = Allocate<Real_t>(n) ;
++         m_fz8 = Allocate<Real_t>(n) ;
++         m_fx8Size = n ;
++      }
++   }
++   void EnsureHG8(size_t n) {
++      if (n > m_hg8Size) {
++         Release(&m_dvdx8); Release(&m_dvdy8); Release(&m_dvdz8);
++         Release(&m_x8n); Release(&m_y8n); Release(&m_z8n);
++         m_dvdx8 = Allocate<Real_t>(n) ;
++         m_dvdy8 = Allocate<Real_t>(n) ;
++         m_dvdz8 = Allocate<Real_t>(n) ;
++         m_x8n   = Allocate<Real_t>(n) ;
++         m_y8n   = Allocate<Real_t>(n) ;
++         m_z8n   = Allocate<Real_t>(n) ;
++         m_hg8Size = n ;
++      }
++   }
++public:
++
++private:
++   void EnsureSig(Int_t numElem) {
++      if ((size_t)numElem > m_sigSize) {
++         Release(&m_sigxx); Release(&m_sigyy); Release(&m_sigzz); Release(&m_determ);
++         m_sigxx = Allocate<Real_t>(numElem) ;
++         m_sigyy = Allocate<Real_t>(numElem) ;
++         m_sigzz = Allocate<Real_t>(numElem) ;
++         m_determ = Allocate<Real_t>(numElem) ;
++         m_sigSize = numElem ;
++      }
++   }
++public:
+    
+    //
+    // ACCESSORS
+@@ -499,15 +617,34 @@
+ 
+    std::vector<Int_t>    m_elemBC ;  /* symmetry/free-surface flags for each elem face */
+ 
+-   Real_t             *m_dxx ;  /* principal strains -- temporary */
++   Real_t             *m_dxx = NULL ;  /* principal strains -- temporary */
+    Real_t             *m_dyy ;
+    Real_t             *m_dzz ;
+ 
+-   Real_t             *m_delv_xi ;    /* velocity gradient -- temporary */
++   Real_t             *m_delv_xi = NULL ;    /* velocity gradient -- temporary */
+    Real_t             *m_delv_eta ;
+    Real_t             *m_delv_zeta ;
++   size_t             m_delxSize = 0 ;
++   size_t             m_delvSize = 0 ;
++   size_t             m_strainSize = 0 ;
++   size_t             m_sigSize = 0 ;
++   Real_t             *m_sigxx = NULL ;
++   Real_t             *m_sigyy = NULL ;
++   Real_t             *m_sigzz = NULL ;
++   Real_t             *m_determ = NULL ;
++   Real_t             *m_fx8 = NULL ;
++   Real_t             *m_fy8 = NULL ;
++   Real_t             *m_fz8 = NULL ;
++   size_t             m_fx8Size = 0 ;
++   Real_t             *m_dvdx8 = NULL ;
++   Real_t             *m_dvdy8 = NULL ;
++   Real_t             *m_dvdz8 = NULL ;
++   Real_t             *m_x8n = NULL ;
++   Real_t             *m_y8n = NULL ;
++   Real_t             *m_z8n = NULL ;
++   size_t             m_hg8Size = 0 ;
+ 
+-   Real_t             *m_delx_xi ;    /* coordinate gradient -- temporary */
++   Real_t             *m_delx_xi = NULL ;    /* coordinate gradient -- temporary */
+    Real_t             *m_delx_eta ;
+    Real_t             *m_delx_zeta ;
+    
