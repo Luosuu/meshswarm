@@ -1,0 +1,650 @@
+diff -ruN original/build.sh final/build.sh
+--- original/build.sh	2026-11-16 14:30:33
++++ final/build.sh	2026-11-16 14:30:33
+@@ -1,4 +1,4 @@
+ #!/bin/bash
+ # Builds ./CoMD. Change this as you like; the grader runs it as `bash build.sh`.
+ set -e
+-${CC:-gcc} -std=c99 -O2 -fopenmp -DDOUBLE -I. *.c -lm -o CoMD
++${CC:-gcc} -std=c99 -O3 -march=native -fno-math-errno -fopenmp -DDOUBLE -I. *.c -lm -o CoMD
+diff -ruN original/cmdLineParser.c final/cmdLineParser.c
+--- original/cmdLineParser.c	2026-11-16 14:30:33
++++ final/cmdLineParser.c	2026-11-16 14:30:33
+@@ -69,9 +69,9 @@
+    MyOption* r;
+    if(!o) return NULL;
+    r = nextOption(o);
+-   if(o->longArg)free(o->longArg);
+-   if(o->help)free(o->help);
+-   free(o);
++   if(o->longArg)comdFree(o->longArg);
++   if(o->help)comdFree(o->help);
++   comdFree(o);
+    return r;
+ }
+ 
+@@ -221,8 +221,8 @@
+       }
+    }
+ 
+-   free(opts);
+-   free(sArgs);
++   comdFree(opts);
++   comdFree(sArgs);
+ 
+    return;
+ }
+diff -ruN original/eam.c final/eam.c
+--- original/eam.c	2026-11-16 14:30:33
++++ final/eam.c	2026-11-16 14:30:33
+@@ -151,7 +151,8 @@
+ static InterpolationObject* initInterpolationObject(
+    int n, real_t x0, real_t dx, real_t* data);
+ static void destroyInterpolationObject(InterpolationObject** table);
+-static void interpolate(InterpolationObject* table, real_t r, real_t* f, real_t* df);
++static inline void interpolate(InterpolationObject* table, real_t r, real_t* f, real_t* df);
++
+ static void bcastInterpolationObject(InterpolationObject** table);
+ static void printTableData(InterpolationObject* table, const char* fileName);
+ 
+@@ -234,7 +235,7 @@
+    real_t etot = 0.;
+ 
+    // zero forces / energy / rho /rhoprime
+-   int fsize = s->boxes->nTotalBoxes*MAXATOMS;
++   int fsize = s->boxes->nLocalBoxes*MAXATOMS;
+    #pragma omp parallel for
+    for (int ii=0; ii<fsize; ii++)
+    {
+@@ -258,43 +259,98 @@
+          int nJBox = s->boxes->nAtoms[jBox];
+ 
+          // loop over atoms in iBox
++         const real3* restrict rArr = s->atoms->r;
+          for (int iOff=MAXATOMS*iBox; iOff<(iBox*MAXATOMS+nIBox); iOff++)
+          {
+-            // loop over atoms in jBox
+-            for (int jOff=MAXATOMS*jBox; jOff<(jBox*MAXATOMS+nJBox); jOff++)
+-            {
++            const real_t ri0 = rArr[iOff][0], ri1 = rArr[iOff][1], ri2 = rArr[iOff][2];
++            real_t fi0 = 0.0, fi1 = 0.0, fi2 = 0.0;
++            real_t uLocal = 0.0, rhoLocal = 0.0;
+ 
++            // loop over atoms in jBox, 4 at a time
++            int jOff = MAXATOMS*jBox;
++            const int jEnd = MAXATOMS*jBox+nJBox;
++            for (; jOff+4 <= jEnd; jOff += 4)
++            {
++               real_t dr0_0 = ri0-rArr[jOff+0][0], dr1_0 = ri1-rArr[jOff+0][1], dr2_0 = ri2-rArr[jOff+0][2];
++               real_t dr0_1 = ri0-rArr[jOff+1][0], dr1_1 = ri1-rArr[jOff+1][1], dr2_1 = ri2-rArr[jOff+1][2];
++               real_t dr0_2 = ri0-rArr[jOff+2][0], dr1_2 = ri1-rArr[jOff+2][1], dr2_2 = ri2-rArr[jOff+2][2];
++               real_t dr0_3 = ri0-rArr[jOff+3][0], dr1_3 = ri1-rArr[jOff+3][1], dr2_3 = ri2-rArr[jOff+3][2];
++               real_t r2_0 = dr0_0*dr0_0 + dr1_0*dr1_0 + dr2_0*dr2_0;
++               real_t r2_1 = dr0_1*dr0_1 + dr1_1*dr1_1 + dr2_1*dr2_1;
++               real_t r2_2 = dr0_2*dr0_2 + dr1_2*dr1_2 + dr2_2*dr2_2;
++               real_t r2_3 = dr0_3*dr0_3 + dr1_3*dr1_3 + dr2_3*dr2_3;
++               if (r2_0 <= rCut2 && r2_0 > 0.0)
++               {
++                  real_t r = sqrt(r2_0);
++                  real_t phiTmp, dPhi, rhoTmp, dRho;
++                  interpolate(pot->phi, r, &phiTmp, &dPhi);
++                  interpolate(pot->rho, r, &rhoTmp, &dRho);
++                  real_t fS = dPhi/r;
++                  fi0 -= fS*dr0_0; fi1 -= fS*dr1_0; fi2 -= fS*dr2_0;
++                  uLocal += 0.5*phiTmp; etot += 0.5*phiTmp;
++                  rhoLocal += rhoTmp;
++               }
++               if (r2_1 <= rCut2 && r2_1 > 0.0)
++               {
++                  real_t r = sqrt(r2_1);
++                  real_t phiTmp, dPhi, rhoTmp, dRho;
++                  interpolate(pot->phi, r, &phiTmp, &dPhi);
++                  interpolate(pot->rho, r, &rhoTmp, &dRho);
++                  real_t fS = dPhi/r;
++                  fi0 -= fS*dr0_1; fi1 -= fS*dr1_1; fi2 -= fS*dr2_1;
++                  uLocal += 0.5*phiTmp; etot += 0.5*phiTmp;
++                  rhoLocal += rhoTmp;
++               }
++               if (r2_2 <= rCut2 && r2_2 > 0.0)
++               {
++                  real_t r = sqrt(r2_2);
++                  real_t phiTmp, dPhi, rhoTmp, dRho;
++                  interpolate(pot->phi, r, &phiTmp, &dPhi);
++                  interpolate(pot->rho, r, &rhoTmp, &dRho);
++                  real_t fS = dPhi/r;
++                  fi0 -= fS*dr0_2; fi1 -= fS*dr1_2; fi2 -= fS*dr2_2;
++                  uLocal += 0.5*phiTmp; etot += 0.5*phiTmp;
++                  rhoLocal += rhoTmp;
++               }
++               if (r2_3 <= rCut2 && r2_3 > 0.0)
++               {
++                  real_t r = sqrt(r2_3);
++                  real_t phiTmp, dPhi, rhoTmp, dRho;
++                  interpolate(pot->phi, r, &phiTmp, &dPhi);
++                  interpolate(pot->rho, r, &rhoTmp, &dRho);
++                  real_t fS = dPhi/r;
++                  fi0 -= fS*dr0_3; fi1 -= fS*dr1_3; fi2 -= fS*dr2_3;
++                  uLocal += 0.5*phiTmp; etot += 0.5*phiTmp;
++                  rhoLocal += rhoTmp;
++               }
++            }
++            for (; jOff<jEnd; jOff++)
++            {
+                real3 dr;
+                real_t r2 = 0.0;
+                for (int k=0; k<3; k++)
+                {
+-                  dr[k]=s->atoms->r[iOff][k]-s->atoms->r[jOff][k];
++                  dr[k]=rArr[iOff][k]-rArr[jOff][k];
+                   r2+=dr[k]*dr[k];
+                }
+ 
+                if(r2 <= rCut2 && r2 > 0.0)
+                {
+-
+                   real_t r = sqrt(r2);
+-
+                   real_t phiTmp, dPhi, rhoTmp, dRho;
+                   interpolate(pot->phi, r, &phiTmp, &dPhi);
+                   interpolate(pot->rho, r, &rhoTmp, &dRho);
+-
+-                  for (int k=0; k<3; k++)
+-                  {
+-                     s->atoms->f[iOff][k] -= dPhi*dr[k]/r;
+-                  }
+-
+-                  // Calculate energy contribution
+-                  s->atoms->U[iOff] += 0.5*phiTmp;
+-                  etot += 0.5*phiTmp;
+-
+-                  // accumulate rhobar for each atom
+-                  pot->rhobar[iOff] += rhoTmp;
++                  real_t fS = dPhi/r;
++                  fi0 -= fS*dr[0]; fi1 -= fS*dr[1]; fi2 -= fS*dr[2];
++                  uLocal += 0.5*phiTmp; etot += 0.5*phiTmp;
++                  rhoLocal += rhoTmp;
+                }
+-
+             } // loop over atoms in jBox
++            s->atoms->f[iOff][0] += fi0;
++            s->atoms->f[iOff][1] += fi1;
++            s->atoms->f[iOff][2] += fi2;
++            s->atoms->U[iOff] += uLocal;
++            pot->rhobar[iOff] += rhoLocal;
+          } // loop over atoms in iBox
+       } // loop over neighbor boxes
+    } // loop over local boxes
+@@ -336,35 +392,81 @@
+          int nJBox = s->boxes->nAtoms[jBox];
+ 
+          // loop over atoms in iBox
++         const real3* restrict rArr = s->atoms->r;
+          for (int iOff=MAXATOMS*iBox; iOff<(MAXATOMS*iBox+nIBox); iOff++)
+          {
+-            // loop over atoms in jBox
+-            for (int jOff=MAXATOMS*jBox; jOff<(MAXATOMS*jBox+nJBox); jOff++)
+-            { 
++            const real_t ri0 = rArr[iOff][0], ri1 = rArr[iOff][1], ri2 = rArr[iOff][2];
++            const real_t dfEmbedI = pot->dfEmbed[iOff];
++            real_t fi0 = 0.0, fi1 = 0.0, fi2 = 0.0;
+ 
++            // loop over atoms in jBox, 4 at a time
++            int jOff = MAXATOMS*jBox;
++            const int jEnd = MAXATOMS*jBox+nJBox;
++            for (; jOff+4 <= jEnd; jOff += 4)
++            {
++               real_t dr0_0 = ri0-rArr[jOff+0][0], dr1_0 = ri1-rArr[jOff+0][1], dr2_0 = ri2-rArr[jOff+0][2];
++               real_t dr0_1 = ri0-rArr[jOff+1][0], dr1_1 = ri1-rArr[jOff+1][1], dr2_1 = ri2-rArr[jOff+1][2];
++               real_t dr0_2 = ri0-rArr[jOff+2][0], dr1_2 = ri1-rArr[jOff+2][1], dr2_2 = ri2-rArr[jOff+2][2];
++               real_t dr0_3 = ri0-rArr[jOff+3][0], dr1_3 = ri1-rArr[jOff+3][1], dr2_3 = ri2-rArr[jOff+3][2];
++               real_t r2_0 = dr0_0*dr0_0 + dr1_0*dr1_0 + dr2_0*dr2_0;
++               real_t r2_1 = dr0_1*dr0_1 + dr1_1*dr1_1 + dr2_1*dr2_1;
++               real_t r2_2 = dr0_2*dr0_2 + dr1_2*dr1_2 + dr2_2*dr2_2;
++               real_t r2_3 = dr0_3*dr0_3 + dr1_3*dr1_3 + dr2_3*dr2_3;
++               if (r2_0 <= rCut2 && r2_0 > 0.0)
++               {
++                  real_t r = sqrt(r2_0);
++                  real_t rhoTmp, dRho;
++                  interpolate(pot->rho, r, &rhoTmp, &dRho);
++                  real_t fS = (dfEmbedI+pot->dfEmbed[jOff+0])*dRho/r;
++                  fi0 -= fS*dr0_0; fi1 -= fS*dr1_0; fi2 -= fS*dr2_0;
++               }
++               if (r2_1 <= rCut2 && r2_1 > 0.0)
++               {
++                  real_t r = sqrt(r2_1);
++                  real_t rhoTmp, dRho;
++                  interpolate(pot->rho, r, &rhoTmp, &dRho);
++                  real_t fS = (dfEmbedI+pot->dfEmbed[jOff+1])*dRho/r;
++                  fi0 -= fS*dr0_1; fi1 -= fS*dr1_1; fi2 -= fS*dr2_1;
++               }
++               if (r2_2 <= rCut2 && r2_2 > 0.0)
++               {
++                  real_t r = sqrt(r2_2);
++                  real_t rhoTmp, dRho;
++                  interpolate(pot->rho, r, &rhoTmp, &dRho);
++                  real_t fS = (dfEmbedI+pot->dfEmbed[jOff+2])*dRho/r;
++                  fi0 -= fS*dr0_2; fi1 -= fS*dr1_2; fi2 -= fS*dr2_2;
++               }
++               if (r2_3 <= rCut2 && r2_3 > 0.0)
++               {
++                  real_t r = sqrt(r2_3);
++                  real_t rhoTmp, dRho;
++                  interpolate(pot->rho, r, &rhoTmp, &dRho);
++                  real_t fS = (dfEmbedI+pot->dfEmbed[jOff+3])*dRho/r;
++                  fi0 -= fS*dr0_3; fi1 -= fS*dr1_3; fi2 -= fS*dr2_3;
++               }
++            }
++            for (; jOff<jEnd; jOff++)
++            {
+                real_t r2 = 0.0;
+                real3 dr;
+                for (int k=0; k<3; k++)
+                {
+-                  dr[k]=s->atoms->r[iOff][k]-s->atoms->r[jOff][k];
++                  dr[k]=rArr[iOff][k]-rArr[jOff][k];
+                   r2+=dr[k]*dr[k];
+                }
+ 
+                if(r2 <= rCut2 && r2 > 0.0)
+                {
+-
+                   real_t r = sqrt(r2);
+-
+                   real_t rhoTmp, dRho;
+                   interpolate(pot->rho, r, &rhoTmp, &dRho);
+-
+-                  for (int k=0; k<3; k++)
+-                  {
+-                     s->atoms->f[iOff][k] -= (pot->dfEmbed[iOff]+pot->dfEmbed[jOff])*dRho*dr[k]/r;
+-                  }
++                  real_t fS = (dfEmbedI+pot->dfEmbed[jOff])*dRho/r;
++                  fi0 -= fS*dr[0]; fi1 -= fS*dr[1]; fi2 -= fS*dr[2];
+                }
+-
+             } // loop over atoms in jBox
++            s->atoms->f[iOff][0] += fi0;
++            s->atoms->f[iOff][1] += fi1;
++            s->atoms->f[iOff][2] += fi2;
+          } // loop over atoms in iBox
+       } // loop over neighbor boxes
+    } // loop over local boxes
+@@ -509,7 +611,7 @@
+ /// \param [in] r Point where function value is needed.
+ /// \param [out] f The interpolated value of f(r).
+ /// \param [out] df The interpolated value of df(r)/dr.
+-void interpolate(InterpolationObject* table, real_t r, real_t* f, real_t* df)
++static inline void interpolate(InterpolationObject* table, real_t r, real_t* f, real_t* df)
+ {
+    const real_t* tt = table->values; // alias
+    
+diff -ruN original/haloExchange.c final/haloExchange.c
+--- original/haloExchange.c	2026-11-16 14:30:33
++++ final/haloExchange.c	2026-11-16 14:30:33
+@@ -238,6 +238,10 @@
+ 
+ void destroyHaloExchange(HaloExchange** haloExchange)
+ {
++   comdFree((*haloExchange)->sendBufM);
++   comdFree((*haloExchange)->sendBufP);
++   comdFree((*haloExchange)->recvBufM);
++   comdFree((*haloExchange)->recvBufP);
+    (*haloExchange)->destroy((*haloExchange)->parms);
+    comdFree((*haloExchange)->parms);
+    comdFree(*haloExchange);
+@@ -263,6 +267,10 @@
+    hh->nbrRank[HALO_Z_MINUS] = processorNum(domain,  0,  0, -1);
+    hh->nbrRank[HALO_Z_PLUS]  = processorNum(domain,  0,  0, +1);
+    hh->bufCapacity = 0; // will be set by sub-class.
++   hh->sendBufM = NULL;
++   hh->sendBufP = NULL;
++   hh->recvBufM = NULL;
++   hh->recvBufP = NULL;
+ 
+    return hh;
+ }
+@@ -280,10 +288,17 @@
+    enum HaloFaceOrder faceM = 2*iAxis;
+    enum HaloFaceOrder faceP = faceM+1;
+ 
+-   char* sendBufM = comdMalloc(haloExchange->bufCapacity);
+-   char* sendBufP = comdMalloc(haloExchange->bufCapacity);
+-   char* recvBufM = comdMalloc(haloExchange->bufCapacity);
+-   char* recvBufP = comdMalloc(haloExchange->bufCapacity);
++   if (haloExchange->sendBufM == NULL)
++   {
++      haloExchange->sendBufM = comdMalloc(haloExchange->bufCapacity);
++      haloExchange->sendBufP = comdMalloc(haloExchange->bufCapacity);
++      haloExchange->recvBufM = comdMalloc(haloExchange->bufCapacity);
++      haloExchange->recvBufP = comdMalloc(haloExchange->bufCapacity);
++   }
++   char* sendBufM = haloExchange->sendBufM;
++   char* sendBufP = haloExchange->sendBufP;
++   char* recvBufM = haloExchange->recvBufM;
++   char* recvBufP = haloExchange->recvBufP;
+ 
+    int nSendM = haloExchange->loadBuffer(haloExchange->parms, data, faceM, sendBufM);
+    int nSendP = haloExchange->loadBuffer(haloExchange->parms, data, faceP, sendBufP);
+@@ -294,16 +309,23 @@
+    int nRecvM, nRecvP;
+ 
+    startTimer(commHaloTimer);
+-   nRecvP = sendReceiveParallel(sendBufM, nSendM, nbrRankM, recvBufP, haloExchange->bufCapacity, nbrRankP);
+-   nRecvM = sendReceiveParallel(sendBufP, nSendP, nbrRankP, recvBufM, haloExchange->bufCapacity, nbrRankM);
++   if (!builtWithMpi() && nbrRankM == nbrRankP)
++   {
++      // single rank: send and receive are the same buffer; skip the copy
++      nRecvM = nSendP;
++      nRecvP = nSendM;
++      recvBufM = sendBufP;
++      recvBufP = sendBufM;
++   }
++   else
++   {
++      nRecvP = sendReceiveParallel(sendBufM, nSendM, nbrRankM, recvBufP, haloExchange->bufCapacity, nbrRankP);
++      nRecvM = sendReceiveParallel(sendBufP, nSendP, nbrRankP, recvBufM, haloExchange->bufCapacity, nbrRankM);
++   }
+    stopTimer(commHaloTimer);
+    
+    haloExchange->unloadBuffer(haloExchange->parms, data, faceM, nRecvM, recvBufM);
+    haloExchange->unloadBuffer(haloExchange->parms, data, faceP, nRecvP, recvBufP);
+-   comdFree(recvBufP);
+-   comdFree(recvBufM);
+-   comdFree(sendBufP);
+-   comdFree(sendBufM);
+ }
+ 
+ /// Make a list of link cells that need to be sent across the specified
+@@ -613,35 +635,42 @@
+ void sortAtomsInCell(Atoms* atoms, LinkCell* boxes, int iBox)
+ {
+    int nAtoms = boxes->nAtoms[iBox];
+-
+-   AtomMsg tmp[nAtoms];
+-
++   if (nAtoms < 2) return;
+    int begin = iBox*MAXATOMS;
+    int end = begin + nAtoms;
+-   for (int ii=begin, iTmp=0; ii<end; ++ii, ++iTmp)
++
++   // Insertion sort by gid, in place: cells hold at most MAXATOMS atoms
++   // (typically a few dozen) and are nearly ordered, so this beats qsort
++   // and avoids the temporary buffer.
++   for (int i=begin+1; i<end; ++i)
+    {
+-      tmp[iTmp].gid  = atoms->gid[ii];
+-      tmp[iTmp].type = atoms->iSpecies[ii];
+-      tmp[iTmp].rx =   atoms->r[ii][0];
+-      tmp[iTmp].ry =   atoms->r[ii][1];
+-      tmp[iTmp].rz =   atoms->r[ii][2];
+-      tmp[iTmp].px =   atoms->p[ii][0];
+-      tmp[iTmp].py =   atoms->p[ii][1];
+-      tmp[iTmp].pz =   atoms->p[ii][2];
++      int gid = atoms->gid[i];
++      int type = atoms->iSpecies[i];
++      real_t rx = atoms->r[i][0], ry = atoms->r[i][1], rz = atoms->r[i][2];
++      real_t px = atoms->p[i][0], py = atoms->p[i][1], pz = atoms->p[i][2];
++      real_t U = atoms->U[i];
++      int j = i-1;
++      while (j >= begin && atoms->gid[j] > gid)
++      {
++         atoms->gid[j+1] = atoms->gid[j];
++         atoms->iSpecies[j+1] = atoms->iSpecies[j];
++         atoms->r[j+1][0] = atoms->r[j][0];
++         atoms->r[j+1][1] = atoms->r[j][1];
++         atoms->r[j+1][2] = atoms->r[j][2];
++         atoms->p[j+1][0] = atoms->p[j][0];
++         atoms->p[j+1][1] = atoms->p[j][1];
++         atoms->p[j+1][2] = atoms->p[j][2];
++         atoms->U[j+1] = atoms->U[j];
++         --j;
++      }
++      int k = j+1;
++      atoms->gid[k] = gid;
++      atoms->iSpecies[k] = type;
++      atoms->r[k][0] = rx; atoms->r[k][1] = ry; atoms->r[k][2] = rz;
++      atoms->p[k][0] = px; atoms->p[k][1] = py; atoms->p[k][2] = pz;
++      atoms->U[k] = U;
+    }
+-   qsort(&tmp, nAtoms, sizeof(AtomMsg), sortAtomsById);
+-   for (int ii=begin, iTmp=0; ii<end; ++ii, ++iTmp)
+-   {
+-      atoms->gid[ii]   = tmp[iTmp].gid;
+-      atoms->iSpecies[ii] = tmp[iTmp].type;
+-      atoms->r[ii][0]  = tmp[iTmp].rx;
+-      atoms->r[ii][1]  = tmp[iTmp].ry;
+-      atoms->r[ii][2]  = tmp[iTmp].rz;
+-      atoms->p[ii][0]  = tmp[iTmp].px;
+-      atoms->p[ii][1]  = tmp[iTmp].py;
+-      atoms->p[ii][2]  = tmp[iTmp].pz;
+-   }
+-   
++   return;
+ }
+ 
+ ///  A function suitable for passing to qsort to sort atoms by gid.
+diff -ruN original/haloExchange.h final/haloExchange.h
+--- original/haloExchange.h	2026-11-16 14:30:33
++++ final/haloExchange.h	2026-11-16 14:30:33
+@@ -65,6 +65,11 @@
+    /// A pointer to a sub-class specific structure that contains
+    /// additional data members needed by the sub-class.
+    void* parms;
++   /// Persistent communication buffers, allocated on first use.
++   char* sendBufM;
++   char* sendBufP;
++   char* recvBufM;
++   char* recvBufP;
+ } 
+ HaloExchange;
+ 
+diff -ruN original/linkCells.c final/linkCells.c
+--- original/linkCells.c	2026-11-16 14:30:33
++++ final/linkCells.c	2026-11-16 14:30:33
+@@ -288,13 +288,34 @@
+ {
+    emptyHaloCells(boxes);
+    
++   const real_t* boxSize = boxes->boxSize;
++   const real_t* localMin = boxes->localMin;
++   const int* gridSize = boxes->gridSize;
++   const int gx = gridSize[0], gy = gridSize[1];
+    for (int iBox=0; iBox<boxes->nLocalBoxes; ++iBox)
+    {
+       int iOff = iBox*MAXATOMS;
++      int ix = iBox % gx;
++      int iy = (iBox / gx) % gy;
++      int iz = iBox / (gx*gy);
++      real_t bmin0 = localMin[0] + ix*boxSize[0] + 0.25;
++      real_t bmax0 = localMin[0] + (ix+1)*boxSize[0] - 0.25;
++      real_t bmin1 = localMin[1] + iy*boxSize[1] + 0.25;
++      real_t bmax1 = localMin[1] + (iy+1)*boxSize[1] - 0.25;
++      real_t bmin2 = localMin[2] + iz*boxSize[2] + 0.25;
++      real_t bmax2 = localMin[2] + (iz+1)*boxSize[2] - 0.25;
+       int ii=0;
+       while (ii < boxes->nAtoms[iBox])
+       {
+-         int jBox = getBoxFromCoord(boxes, atoms->r[iOff+ii]);
++         real_t* rr = atoms->r[iOff+ii];
++         if (rr[0] > bmin0 && rr[0] < bmax0 &&
++             rr[1] > bmin1 && rr[1] < bmax1 &&
++             rr[2] > bmin2 && rr[2] < bmax2)
++         {
++            ++ii;
++            continue;
++         }
++         int jBox = getBoxFromCoord(boxes, rr);
+          if (jBox != iBox)
+             moveAtom(boxes, atoms, ii, iBox, jBox);
+          else
+@@ -381,8 +402,8 @@
+ /// Set the number of atoms to zero in all halo link cells.
+ void emptyHaloCells(LinkCell* boxes)
+ {
+-   for (int ii=boxes->nLocalBoxes; ii<boxes->nTotalBoxes; ++ii)
+-      boxes->nAtoms[ii] = 0;
++   memset(boxes->nAtoms + boxes->nLocalBoxes, 0,
++          (boxes->nTotalBoxes - boxes->nLocalBoxes)*sizeof(int));
+ }
+ 
+ /// Get the grid coordinates of the link cell with index iBox.  Local
+diff -ruN original/ljForce.c final/ljForce.c
+--- original/ljForce.c	2026-11-16 14:30:33
++++ final/ljForce.c	2026-11-16 14:30:33
+@@ -153,7 +153,7 @@
+    // zero forces and energy
+    real_t ePot = 0.0;
+    s->ePotential = 0.0;
+-   int fSize = s->boxes->nTotalBoxes*MAXATOMS;
++   int fSize = s->boxes->nLocalBoxes*MAXATOMS;
+    #pragma omp parallel for
+    for (int ii=0; ii<fSize; ++ii)
+    {
+@@ -173,6 +173,7 @@
+    for (int iBox=0; iBox<s->boxes->nLocalBoxes; iBox++)
+    {
+       int nIBox = s->boxes->nAtoms[iBox];
++      const real3* restrict rArr = s->atoms->r;
+    
+       // loop over neighbors of iBox
+       for (int jTmp=0; jTmp<nNbrBoxes; jTmp++)
+@@ -186,37 +187,86 @@
+          // loop over atoms in iBox
+          for (int iOff=MAXATOMS*iBox; iOff<(iBox*MAXATOMS+nIBox); iOff++)
+          {
++            const real_t ri0 = rArr[iOff][0];
++            const real_t ri1 = rArr[iOff][1];
++            const real_t ri2 = rArr[iOff][2];
++            real_t fi0 = 0.0, fi1 = 0.0, fi2 = 0.0;
++            real_t uLocal = 0.0;
+ 
+-            // loop over atoms in jBox
+-            for (int jOff=jBox*MAXATOMS; jOff<(jBox*MAXATOMS+nJBox); jOff++)
++            // loop over atoms in jBox, 4 at a time
++            int jOff = jBox*MAXATOMS;
++            const int jEnd = jBox*MAXATOMS+nJBox;
++            for (; jOff+4 <= jEnd; jOff += 4)
+             {
++               real_t dr0_0 = ri0-rArr[jOff+0][0], dr1_0 = ri1-rArr[jOff+0][1], dr2_0 = ri2-rArr[jOff+0][2];
++               real_t dr0_1 = ri0-rArr[jOff+1][0], dr1_1 = ri1-rArr[jOff+1][1], dr2_1 = ri2-rArr[jOff+1][2];
++               real_t dr0_2 = ri0-rArr[jOff+2][0], dr1_2 = ri1-rArr[jOff+2][1], dr2_2 = ri2-rArr[jOff+2][2];
++               real_t dr0_3 = ri0-rArr[jOff+3][0], dr1_3 = ri1-rArr[jOff+3][1], dr2_3 = ri2-rArr[jOff+3][2];
++               real_t r2_0 = dr0_0*dr0_0 + dr1_0*dr1_0 + dr2_0*dr2_0;
++               real_t r2_1 = dr0_1*dr0_1 + dr1_1*dr1_1 + dr2_1*dr2_1;
++               real_t r2_2 = dr0_2*dr0_2 + dr1_2*dr1_2 + dr2_2*dr2_2;
++               real_t r2_3 = dr0_3*dr0_3 + dr1_3*dr1_3 + dr2_3*dr2_3;
++               if (r2_0 <= rCut2 && r2_0 > 0.0)
++               {
++                  real_t rr = 1.0/r2_0;
++                  real_t r6 = s6 * (rr*rr*rr);
++                  real_t eLocal = r6 * (r6 - 1.0) - eShift;
++                  uLocal += 0.5*eLocal; ePot += 0.5*eLocal;
++                  real_t fr = - 4.0*epsilon*r6*rr*(12.0*r6 - 6.0);
++                  fi0 -= dr0_0*fr; fi1 -= dr1_0*fr; fi2 -= dr2_0*fr;
++               }
++               if (r2_1 <= rCut2 && r2_1 > 0.0)
++               {
++                  real_t rr = 1.0/r2_1;
++                  real_t r6 = s6 * (rr*rr*rr);
++                  real_t eLocal = r6 * (r6 - 1.0) - eShift;
++                  uLocal += 0.5*eLocal; ePot += 0.5*eLocal;
++                  real_t fr = - 4.0*epsilon*r6*rr*(12.0*r6 - 6.0);
++                  fi0 -= dr0_1*fr; fi1 -= dr1_1*fr; fi2 -= dr2_1*fr;
++               }
++               if (r2_2 <= rCut2 && r2_2 > 0.0)
++               {
++                  real_t rr = 1.0/r2_2;
++                  real_t r6 = s6 * (rr*rr*rr);
++                  real_t eLocal = r6 * (r6 - 1.0) - eShift;
++                  uLocal += 0.5*eLocal; ePot += 0.5*eLocal;
++                  real_t fr = - 4.0*epsilon*r6*rr*(12.0*r6 - 6.0);
++                  fi0 -= dr0_2*fr; fi1 -= dr1_2*fr; fi2 -= dr2_2*fr;
++               }
++               if (r2_3 <= rCut2 && r2_3 > 0.0)
++               {
++                  real_t rr = 1.0/r2_3;
++                  real_t r6 = s6 * (rr*rr*rr);
++                  real_t eLocal = r6 * (r6 - 1.0) - eShift;
++                  uLocal += 0.5*eLocal; ePot += 0.5*eLocal;
++                  real_t fr = - 4.0*epsilon*r6*rr*(12.0*r6 - 6.0);
++                  fi0 -= dr0_3*fr; fi1 -= dr1_3*fr; fi2 -= dr2_3*fr;
++               }
++            }
++            for (; jOff<jEnd; jOff++)
++            {
+                real3 dr;
+                real_t r2 = 0.0;
+                for (int m=0; m<3; m++)
+                {
+-                  dr[m] = s->atoms->r[iOff][m]-s->atoms->r[jOff][m];
++                  dr[m] = rArr[iOff][m]-rArr[jOff][m];
+                   r2+=dr[m]*dr[m];
+                }
+ 
+                if ( r2 <= rCut2 && r2 > 0.0)
+                {
+-
+-                  // Important note:
+-                  // from this point on r actually refers to 1.0/r
+                   r2 = 1.0/r2;
+                   real_t r6 = s6 * (r2*r2*r2);
+                   real_t eLocal = r6 * (r6 - 1.0) - eShift;
+-                  s->atoms->U[iOff] += 0.5*eLocal;
+-                  ePot += 0.5*eLocal;
+-
+-                  // different formulation to avoid sqrt computation
++                  uLocal += 0.5*eLocal; ePot += 0.5*eLocal;
+                   real_t fr = - 4.0*epsilon*r6*r2*(12.0*r6 - 6.0);
+-                  for (int m=0; m<3; m++)
+-                  {
+-                     s->atoms->f[iOff][m] -= dr[m]*fr;
+-                  }
++                  fi0 -= dr[0]*fr; fi1 -= dr[1]*fr; fi2 -= dr[2]*fr;
+                }
+-            } // loop over atoms in jBox
++            }
++            s->atoms->f[iOff][0] += fi0;
++            s->atoms->f[iOff][1] += fi1;
++            s->atoms->f[iOff][2] += fi2;
++            s->atoms->U[iOff] += uLocal;
+          } // loop over atoms in iBox
+       } // loop over neighbor boxes
+    } // loop over local boxes in system
+diff -ruN original/memUtils.h final/memUtils.h
+--- original/memUtils.h	2026-11-16 14:30:33
++++ final/memUtils.h	2026-11-16 14:30:33
+@@ -5,26 +5,27 @@
+ #define _MEMUTILS_H_
+ 
+ #include <stdlib.h>
++#include <mm_malloc.h>
++#include <string.h>
+ 
+ #define freeMe(s,element) {if(s->element) comdFree(s->element);  s->element = NULL;}
+ 
+ static void* comdMalloc(size_t iSize)
+ {
+-   return malloc(iSize);
++   void* p = NULL;
++   p = _mm_malloc(iSize, 64);
++   return p;
+ }
+ 
+ static void* comdCalloc(size_t num, size_t iSize)
+ {
+-   return calloc(num, iSize);
++   void* p = _mm_malloc(num*iSize, 64);
++   if (p) memset(p, 0, num*iSize);
++   return p;
+ }
+ 
+-static void* comdRealloc(void* ptr, size_t iSize)
+-{
+-   return realloc(ptr, iSize);
+-}
+-
+ static void comdFree(void *ptr)
+ {
+-   free(ptr);
++   _mm_free(ptr);
+ }
+ #endif

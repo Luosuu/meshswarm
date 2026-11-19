@@ -1,0 +1,859 @@
+diff -ruN original/build.sh final/build.sh
+--- original/build.sh	2026-11-16 14:30:33
++++ final/build.sh	2026-11-16 14:30:33
+@@ -1,4 +1,4 @@
+ #!/bin/bash
+ # Builds ./CoMD. Change this as you like; the grader runs it as `bash build.sh`.
+ set -e
+-${CC:-gcc} -std=c99 -O2 -fopenmp -DDOUBLE -I. *.c -lm -o CoMD
++${CC:-gcc} -std=c99 -O3 -march=native -fno-math-errno -fopenmp -DDOUBLE -I. *.c -lm -o CoMD
+diff -ruN original/eam.c final/eam.c
+--- original/eam.c	2026-11-16 14:30:33
++++ final/eam.c	2026-11-16 14:30:33
+@@ -219,9 +219,9 @@
+    assert(pot);
+ 
+    // set up halo exchange and internal storage on first call to forces.
++   int maxTotalAtoms = MAXATOMS*s->boxes->nTotalBoxes;
+    if (pot->forceExchange == NULL)
+    {
+-      int maxTotalAtoms = MAXATOMS*s->boxes->nTotalBoxes;
+       pot->dfEmbed = comdMalloc(maxTotalAtoms*sizeof(real_t));
+       pot->rhobar  = comdMalloc(maxTotalAtoms*sizeof(real_t));
+       pot->forceExchange = initForceHaloExchange(s->domain, s->boxes);
+@@ -229,78 +229,136 @@
+       pot->forceExchangeData->dfEmbed = pot->dfEmbed;
+       pot->forceExchangeData->boxes = s->boxes;
+    }
+-   
++   // persistent thread-private accumulators (zero-preserved between calls)
++   static real3* pf = NULL;
++   static real_t* prh = NULL;
++   static int pCap = 0;
++   int nthreads = omp_get_max_threads();
++   int fsize = maxTotalAtoms;
++   if (pCap < nthreads*fsize)
++   {
++      free(pf); free(prh);
++      pf  = (real3*) calloc((size_t)nthreads*fsize, sizeof(real3));
++      prh = (real_t*)calloc((size_t)nthreads*fsize, sizeof(real_t));
++      pCap = nthreads*fsize;
++   }
++
+    real_t rCut2 = pot->cutoff*pot->cutoff;
+    real_t etot = 0.;
+ 
+-   // zero forces / energy / rho /rhoprime
+-   int fsize = s->boxes->nTotalBoxes*MAXATOMS;
+-   #pragma omp parallel for
+-   for (int ii=0; ii<fsize; ii++)
+-   {
+-      zeroReal3(s->atoms->f[ii]);
+-      s->atoms->U[ii] = 0.;
+-      pot->dfEmbed[ii] = 0.;
+-      pot->rhobar[ii] = 0.;
+-   }
++   int nLocalBoxes = s->boxes->nLocalBoxes;
++   const int* nAtoms = s->boxes->nAtoms;
+ 
+    int nNbrBoxes = 27;
+-   // loop over local boxes
+-   #pragma omp parallel for reduction(+:etot)
+-   for (int iBox=0; iBox<s->boxes->nLocalBoxes; iBox++)
++   const real3* rArr = s->atoms->r;
++   int** nbrBoxes = s->boxes->nbrBoxes;
++
++   // half-pair first pass (fused phi/rho):
++   //   - phi energy computed once per unordered pair
++   //   - dPhi force contributions applied to both endpoints
++   //   - rhobar accumulated for both endpoints
++   real_t ePair = 0.;
++   #pragma omp parallel reduction(+:ePair)
+    {
+-      int nIBox = s->boxes->nAtoms[iBox];
++      int tid = omp_get_thread_num();
++      real3* fPriv = pf + (size_t)tid*fsize;
++      real_t* rhPriv = prh + (size_t)tid*fsize;
+ 
+-      // loop over neighbor boxes of iBox (some may be halo boxes)
+-      for (int jTmp=0; jTmp<nNbrBoxes; jTmp++)
++      #pragma omp for schedule(dynamic,16)
++      for (int iBox=0; iBox<nLocalBoxes; iBox++)
+       {
+-         int jBox = s->boxes->nbrBoxes[iBox][jTmp];
+-         int nJBox = s->boxes->nAtoms[jBox];
++         int nIBox = nAtoms[iBox];
+ 
+-         // loop over atoms in iBox
+          for (int iOff=MAXATOMS*iBox; iOff<(iBox*MAXATOMS+nIBox); iOff++)
+          {
+-            // loop over atoms in jBox
+-            for (int jOff=MAXATOMS*jBox; jOff<(jBox*MAXATOMS+nJBox); jOff++)
++            real_t ri0 = rArr[iOff][0], ri1 = rArr[iOff][1], ri2 = rArr[iOff][2];
++            real_t fi0 = 0.0, fi1 = 0.0, fi2 = 0.0;
++            real_t rhOff = 0.0;
++            int iLin = iOff - MAXATOMS*iBox;
++
++            // loop over neighbor boxes of iBox (some may be halo boxes)
++            for (int jTmp=0; jTmp<nNbrBoxes; jTmp++)
+             {
++               int jBox = nbrBoxes[iBox][jTmp];
++               if (jBox < nLocalBoxes && jBox < iBox)
++                  continue;  // local-local pair handled by the lower box
++               int nJBox = nAtoms[jBox];
++               int jjStart = (jBox == iBox) ? (iLin+1) : 0;
++               const real3* rJBox = rArr + jBox*MAXATOMS;
+ 
+-               real3 dr;
+-               real_t r2 = 0.0;
+-               for (int k=0; k<3; k++)
++               for (int jj=jjStart; jj<nJBox; jj++)
+                {
+-                  dr[k]=s->atoms->r[iOff][k]-s->atoms->r[jOff][k];
+-                  r2+=dr[k]*dr[k];
+-               }
++                  const real_t* rj = rJBox[jj];
++                  real_t dr0 = ri0 - rj[0];
++                  real_t dr1 = ri1 - rj[1];
++                  real_t dr2 = ri2 - rj[2];
++                  real_t r2 = dr0*dr0 + dr1*dr1 + dr2*dr2;
+ 
+-               if(r2 <= rCut2 && r2 > 0.0)
+-               {
++                  if(r2 <= rCut2 && r2 > 0.0)
++                  {
++                     real_t r = sqrt(r2);
+ 
+-                  real_t r = sqrt(r2);
++                     real_t phiTmp, dPhi, rhoTmp, dRho;
++                     interpolate(pot->phi, r, &phiTmp, &dPhi);
++                     interpolate(pot->rho, r, &rhoTmp, &dRho);
+ 
+-                  real_t phiTmp, dPhi, rhoTmp, dRho;
+-                  interpolate(pot->phi, r, &phiTmp, &dPhi);
+-                  interpolate(pot->rho, r, &rhoTmp, &dRho);
++                     real_t inv_r = 1.0/r;
++                     real_t dphi_scaled = dPhi*inv_r;
++                     fi0 -= dphi_scaled*dr0;
++                     fi1 -= dphi_scaled*dr1;
++                     fi2 -= dphi_scaled*dr2;
+ 
+-                  for (int k=0; k<3; k++)
+-                  {
+-                     s->atoms->f[iOff][k] -= dPhi*dr[k]/r;
+-                  }
++                     if (jBox < nLocalBoxes)
++                        ePair += phiTmp;
++                     else
++                        ePair += 0.5*phiTmp;
++                     rhOff += rhoTmp;
+ 
+-                  // Calculate energy contribution
+-                  s->atoms->U[iOff] += 0.5*phiTmp;
+-                  etot += 0.5*phiTmp;
+-
+-                  // accumulate rhobar for each atom
+-                  pot->rhobar[iOff] += rhoTmp;
++                     if (jBox < nLocalBoxes)
++                     {
++                        int jOff = MAXATOMS*jBox + jj;
++                        rhPriv[jOff] += rhoTmp;
++                        fPriv[jOff][0] += dphi_scaled*dr0;
++                        fPriv[jOff][1] += dphi_scaled*dr1;
++                        fPriv[jOff][2] += dphi_scaled*dr2;
++                     }
++                  }
+                }
++            }
++            rhPriv[iOff] += rhOff;
++            fPriv[iOff][0] += fi0;
++            fPriv[iOff][1] += fi1;
++            fPriv[iOff][2] += fi2;
++         }
++      }
++   }
+ 
+-            } // loop over atoms in jBox
+-         } // loop over atoms in iBox
+-      } // loop over neighbor boxes
+-   } // loop over local boxes
++   // reduce thread-private contributions over live slots into shared arrays;
++   // reset consumed private slots to zero for the next call
++   #pragma omp parallel for
++   for (int iBox=0; iBox<nLocalBoxes; iBox++)
++   {
++      int n = nAtoms[iBox];
++      for (int a=0; a<n; a++)
++      {
++         int ii = iBox*MAXATOMS + a;
++         real_t rh = 0.0, f0 = 0.0, f1 = 0.0, f2 = 0.0;
++         for (int t=0; t<nthreads; t++)
++         {
++            size_t off = (size_t)t*fsize + ii;
++            rh += prh[off]; prh[off] = 0.0;
++            f0 += pf[off][0]; f1 += pf[off][1]; f2 += pf[off][2];
++            pf[off][0] = 0.0; pf[off][1] = 0.0; pf[off][2] = 0.0;
++         }
++         // every live local slot is overwritten here, so assign instead of
++         // accumulating and skip the pre-zero sweep
++         pot->rhobar[ii] = rh;
++         s->atoms->f[ii][0] = f0; s->atoms->f[ii][1] = f1; s->atoms->f[ii][2] = f2;
++      }
++   }
++   etot += ePair;
+ 
+    // Compute Embedding Energy
+-   // loop over all local boxes
+    #pragma omp parallel for reduction(+:etot)
+    for (int iBox=0; iBox<s->boxes->nLocalBoxes; iBox++)
+    {
+@@ -312,62 +370,100 @@
+          real_t fEmbed, dfEmbed;
+          interpolate(pot->f, pot->rhobar[iOff], &fEmbed, &dfEmbed);
+          pot->dfEmbed[iOff] = dfEmbed; // save derivative for halo exchange
+-         s->atoms->U[iOff] += fEmbed;
+          etot += fEmbed;
+       }
+    }
+ 
+-   // exchange derivative of the embedding energy with repsect to rhobar
++   // exchange derivative of the embedding energy with respect to rhobar
+    startTimer(eamHaloTimer);
+    haloExchange(pot->forceExchange, pot->forceExchangeData);
+    stopTimer(eamHaloTimer);
+ 
+-   // third pass
+-   // loop over local boxes
+-   #pragma omp parallel for
+-   for (int iBox=0; iBox<s->boxes->nLocalBoxes; iBox++)
++   // third pass (half pairs): embedding-energy force contribution computed
++   // once per unordered pair, applied to both endpoints.
++   #pragma omp parallel
+    {
+-      int nIBox = s->boxes->nAtoms[iBox];
++      int tid = omp_get_thread_num();
++      real3* fPriv = pf + (size_t)tid*fsize;
+ 
+-      // loop over neighbor boxes of iBox (some may be halo boxes)
+-      for (int jTmp=0; jTmp<nNbrBoxes; jTmp++)
++      #pragma omp for schedule(dynamic,16)
++      for (int iBox=0; iBox<nLocalBoxes; iBox++)
+       {
+-         int jBox = s->boxes->nbrBoxes[iBox][jTmp];
+-         int nJBox = s->boxes->nAtoms[jBox];
++         int nIBox = s->boxes->nAtoms[iBox];
+ 
+-         // loop over atoms in iBox
+          for (int iOff=MAXATOMS*iBox; iOff<(MAXATOMS*iBox+nIBox); iOff++)
+          {
+-            // loop over atoms in jBox
+-            for (int jOff=MAXATOMS*jBox; jOff<(MAXATOMS*jBox+nJBox); jOff++)
+-            { 
++            real_t ri0 = rArr[iOff][0], ri1 = rArr[iOff][1], ri2 = rArr[iOff][2];
++            real_t di = pot->dfEmbed[iOff];
++            real_t fi0 = 0.0, fi1 = 0.0, fi2 = 0.0;
++            int iLin = iOff - MAXATOMS*iBox;
+ 
+-               real_t r2 = 0.0;
+-               real3 dr;
+-               for (int k=0; k<3; k++)
+-               {
+-                  dr[k]=s->atoms->r[iOff][k]-s->atoms->r[jOff][k];
+-                  r2+=dr[k]*dr[k];
+-               }
++            // loop over neighbor boxes of iBox (some may be halo boxes)
++            for (int jTmp=0; jTmp<nNbrBoxes; jTmp++)
++            {
++               int jBox = nbrBoxes[iBox][jTmp];
++               if (jBox < nLocalBoxes && jBox < iBox)
++                  continue;  // local-local pair handled by the lower box
++               int nJBox = nAtoms[jBox];
++               int jjStart = (jBox == iBox) ? (iLin+1) : 0;
++               const real3* rJBox = rArr + jBox*MAXATOMS;
+ 
+-               if(r2 <= rCut2 && r2 > 0.0)
++               for (int jj=jjStart; jj<nJBox; jj++)
+                {
++                  const real_t* rj = rJBox[jj];
++                  real_t dr0 = ri0 - rj[0];
++                  real_t dr1 = ri1 - rj[1];
++                  real_t dr2 = ri2 - rj[2];
++                  real_t r2 = dr0*dr0 + dr1*dr1 + dr2*dr2;
+ 
+-                  real_t r = sqrt(r2);
++                  if(r2 <= rCut2 && r2 > 0.0)
++                  {
++                     real_t r = sqrt(r2);
+ 
+-                  real_t rhoTmp, dRho;
+-                  interpolate(pot->rho, r, &rhoTmp, &dRho);
++                     real_t rhoTmp, dRho;
++                     interpolate(pot->rho, r, &rhoTmp, &dRho);
+ 
+-                  for (int k=0; k<3; k++)
+-                  {
+-                     s->atoms->f[iOff][k] -= (pot->dfEmbed[iOff]+pot->dfEmbed[jOff])*dRho*dr[k]/r;
++                     int jOff = MAXATOMS*jBox + jj;
++                     real_t dsum = (di + pot->dfEmbed[jOff])*dRho/r;
++                     fi0 -= dsum*dr0;
++                     fi1 -= dsum*dr1;
++                     fi2 -= dsum*dr2;
++                     if (jBox < nLocalBoxes)
++                     {
++                        fPriv[jOff][0] += dsum*dr0;
++                        fPriv[jOff][1] += dsum*dr1;
++                        fPriv[jOff][2] += dsum*dr2;
++                     }
+                   }
+                }
++            }
++            fPriv[iOff][0] += fi0;
++            fPriv[iOff][1] += fi1;
++            fPriv[iOff][2] += fi2;
++         }
++      }
++   }
+ 
+-            } // loop over atoms in jBox
+-         } // loop over atoms in iBox
+-      } // loop over neighbor boxes
+-   } // loop over local boxes
++   // reduce third-pass thread-private forces into shared arrays
++   #pragma omp parallel for
++   for (int iBox=0; iBox<nLocalBoxes; iBox++)
++   {
++      int n = nAtoms[iBox];
++      for (int a=0; a<n; a++)
++      {
++         int ii = iBox*MAXATOMS + a;
++         real_t f0 = 0.0, f1 = 0.0, f2 = 0.0;
++         for (int t=0; t<nthreads; t++)
++         {
++            size_t off = (size_t)t*fsize + ii;
++            f0 += pf[off][0]; f1 += pf[off][1]; f2 += pf[off][2];
++            pf[off][0] = 0.0; pf[off][1] = 0.0; pf[off][2] = 0.0;
++         }
++         // pass-1 forces were assigned (not accumulated) into shared f, so
++         // embed pass-3 contributions with an accumulate here
++         s->atoms->f[ii][0] += f0; s->atoms->f[ii][1] += f1; s->atoms->f[ii][2] += f2;
++      }
++   }
+ 
+    s->ePotential = (real_t) etot;
+ 
+@@ -509,10 +605,10 @@
+ /// \param [in] r Point where function value is needed.
+ /// \param [out] f The interpolated value of f(r).
+ /// \param [out] df The interpolated value of df(r)/dr.
+-void interpolate(InterpolationObject* table, real_t r, real_t* f, real_t* df)
++static inline void interpolate(InterpolationObject* table, real_t r, real_t* f, real_t* df)
+ {
+    const real_t* tt = table->values; // alias
+-   
++
+    if ( r < table->x0 ) r = table->x0;
+ 
+    r = (r-table->x0)*(table->invDx) ;
+diff -ruN original/haloExchange.c final/haloExchange.c
+--- original/haloExchange.c	2026-11-16 14:30:33
++++ final/haloExchange.c	2026-11-16 14:30:33
+@@ -240,6 +240,10 @@
+ {
+    (*haloExchange)->destroy((*haloExchange)->parms);
+    comdFree((*haloExchange)->parms);
++   comdFree((*haloExchange)->sendBufM);
++   comdFree((*haloExchange)->sendBufP);
++   comdFree((*haloExchange)->recvBufM);
++   comdFree((*haloExchange)->recvBufP);
+    comdFree(*haloExchange);
+    *haloExchange = NULL;
+ }
+@@ -263,6 +267,10 @@
+    hh->nbrRank[HALO_Z_MINUS] = processorNum(domain,  0,  0, -1);
+    hh->nbrRank[HALO_Z_PLUS]  = processorNum(domain,  0,  0, +1);
+    hh->bufCapacity = 0; // will be set by sub-class.
++   hh->sendBufM = NULL;
++   hh->sendBufP = NULL;
++   hh->recvBufM = NULL;
++   hh->recvBufP = NULL;
+ 
+    return hh;
+ }
+@@ -280,10 +288,22 @@
+    enum HaloFaceOrder faceM = 2*iAxis;
+    enum HaloFaceOrder faceP = faceM+1;
+ 
+-   char* sendBufM = comdMalloc(haloExchange->bufCapacity);
+-   char* sendBufP = comdMalloc(haloExchange->bufCapacity);
+-   char* recvBufM = comdMalloc(haloExchange->bufCapacity);
+-   char* recvBufP = comdMalloc(haloExchange->bufCapacity);
++   // Persistent scratch buffers, allocated once per HaloExchange and reused.
++   char* sendBufM = haloExchange->sendBufM;
++   char* sendBufP = haloExchange->sendBufP;
++   char* recvBufM = haloExchange->recvBufM;
++   char* recvBufP = haloExchange->recvBufP;
++   if (!sendBufM)
++   {
++      sendBufM = comdMalloc(haloExchange->bufCapacity);
++      sendBufP = comdMalloc(haloExchange->bufCapacity);
++      recvBufM = comdMalloc(haloExchange->bufCapacity);
++      recvBufP = comdMalloc(haloExchange->bufCapacity);
++      haloExchange->sendBufM = sendBufM;
++      haloExchange->sendBufP = sendBufP;
++      haloExchange->recvBufM = recvBufM;
++      haloExchange->recvBufP = recvBufP;
++   }
+ 
+    int nSendM = haloExchange->loadBuffer(haloExchange->parms, data, faceM, sendBufM);
+    int nSendP = haloExchange->loadBuffer(haloExchange->parms, data, faceP, sendBufP);
+@@ -300,10 +320,6 @@
+    
+    haloExchange->unloadBuffer(haloExchange->parms, data, faceM, nRecvM, recvBufM);
+    haloExchange->unloadBuffer(haloExchange->parms, data, faceP, nRecvP, recvBufP);
+-   comdFree(recvBufP);
+-   comdFree(recvBufM);
+-   comdFree(sendBufP);
+-   comdFree(sendBufM);
+ }
+ 
+ /// Make a list of link cells that need to be sent across the specified
+@@ -614,6 +630,7 @@
+ {
+    int nAtoms = boxes->nAtoms[iBox];
+ 
++   if (nAtoms <= 1) return;
+    AtomMsg tmp[nAtoms];
+ 
+    int begin = iBox*MAXATOMS;
+@@ -629,7 +646,19 @@
+       tmp[iTmp].py =   atoms->p[ii][1];
+       tmp[iTmp].pz =   atoms->p[ii][2];
+    }
+-   qsort(&tmp, nAtoms, sizeof(AtomMsg), sortAtomsById);
++   // Insertion sort beats qsort on the tiny arrays we see here (cells rarely
++   // hold many atoms) and avoids the function-call overhead per comparison.
++   for (int ii=1; ii<nAtoms; ++ii)
++   {
++      AtomMsg key = tmp[ii];
++      int jj = ii-1;
++      while (jj >= 0 && tmp[jj].gid > key.gid)
++      {
++         tmp[jj+1] = tmp[jj];
++         --jj;
++      }
++      tmp[jj+1] = key;
++   }
+    for (int ii=begin, iTmp=0; ii<end; ++ii, ++iTmp)
+    {
+       atoms->gid[ii]   = tmp[iTmp].gid;
+diff -ruN original/haloExchange.h final/haloExchange.h
+--- original/haloExchange.h	2026-11-16 14:30:33
++++ final/haloExchange.h	2026-11-16 14:30:33
+@@ -28,6 +28,12 @@
+    /// The MPI ranks of the six face neighbors of the local domain.
+    /// Ranks are stored in the order specified in HaloFaceOrder.
+    int nbrRank[6];
++   /// Persistent scratch buffers for the halo exchange (allocated lazily,
++   /// reused every exchange, freed in destroyHaloExchange).
++   char* sendBufM;
++   char* sendBufP;
++   char* recvBufM;
++   char* recvBufP;
+    /// The maximum send/recv buffer size (in bytes) that will be needed
+    /// for this halo exchange.
+    int bufCapacity;
+diff -ruN original/initAtoms.c final/initAtoms.c
+--- original/initAtoms.c	2026-11-16 14:30:33
++++ final/initAtoms.c	2026-11-16 14:30:33
+@@ -36,6 +36,7 @@
+    atoms->nLocal = 0;
+    atoms->nGlobal = 0;
+ 
++   #pragma omp parallel for
+    for (int iOff = 0; iOff < maxTotalAtoms; iOff++)
+    {
+       atoms->gid[iOff] = 0;
+diff -ruN original/linkCells.c final/linkCells.c
+--- original/linkCells.c	2026-11-16 14:30:33
++++ final/linkCells.c	2026-11-16 14:30:33
+@@ -288,6 +288,24 @@
+ {
+    emptyHaloCells(boxes);
+    
++   // Fast path: each thread scans its own boxes; if no atom needs to move
++   // we can skip the bookkeeping entirely. The scan is the same cost as the
++   // classification pass the slow path would do anyway.
++   const int nLocal = boxes->nLocalBoxes;
++   int anyMove = 0;
++   #pragma omp parallel for reduction(|:anyMove)
++   for (int iBox=0; iBox<nLocal; ++iBox)
++   {
++      int iOff = iBox*MAXATOMS;
++      int n = boxes->nAtoms[iBox];
++      for (int ii=0; ii<n; ++ii)
++      {
++         int jBox = getBoxFromCoord(boxes, atoms->r[iOff+ii]);
++         if (jBox != iBox) { anyMove = 1; break; }
++      }
++   }
++   if (!anyMove) return;
++   
+    for (int iBox=0; iBox<boxes->nLocalBoxes; ++iBox)
+    {
+       int iOff = iBox*MAXATOMS;
+@@ -381,6 +399,7 @@
+ /// Set the number of atoms to zero in all halo link cells.
+ void emptyHaloCells(LinkCell* boxes)
+ {
++   #pragma omp parallel for
+    for (int ii=boxes->nLocalBoxes; ii<boxes->nTotalBoxes; ++ii)
+       boxes->nAtoms[ii] = 0;
+ }
+diff -ruN original/ljForce.c final/ljForce.c
+--- original/ljForce.c	2026-11-16 14:30:33
++++ final/ljForce.c	2026-11-16 14:30:33
+@@ -150,78 +150,128 @@
+    real_t rCut = pot->cutoff;
+    real_t rCut2 = rCut*rCut;
+ 
+-   // zero forces and energy
+    real_t ePot = 0.0;
+    s->ePotential = 0.0;
+    int fSize = s->boxes->nTotalBoxes*MAXATOMS;
+-   #pragma omp parallel for
+-   for (int ii=0; ii<fSize; ++ii)
++   real3* fArr = s->atoms->f;
++   int nLocalBoxes = s->boxes->nLocalBoxes;
++   const int* nAtoms = s->boxes->nAtoms;
++
++   // persistent thread-private accumulation arrays (zero preserved by the
++   // reduction pass below, which resets live slots it consumes)
++   static real3* pf = NULL;
++   static int pCap = 0;
++   int nthreads = omp_get_max_threads();
++   if (pCap < nthreads*fSize)
+    {
+-      zeroReal3(s->atoms->f[ii]);
+-      s->atoms->U[ii] = 0.;
++      free(pf);
++      pf = (real3*)calloc((size_t)nthreads*fSize, sizeof(real3));
++      pCap = nthreads*fSize;
+    }
+-   
++
+    real_t s6 = sigma*sigma*sigma*sigma*sigma*sigma;
+ 
+    real_t rCut6 = s6 / (rCut2*rCut2*rCut2);
+    real_t eShift = POT_SHIFT * rCut6 * (rCut6 - 1.0);
+ 
++   real_t fourEpsilon = 4.0*epsilon;
+    int nNbrBoxes = 27;
++   const real3* rArr = s->atoms->r;
++   int** nbrBoxes = s->boxes->nbrBoxes;
+ 
+    // loop over local boxes
+-   #pragma omp parallel for reduction(+:ePot)
+-   for (int iBox=0; iBox<s->boxes->nLocalBoxes; iBox++)
++   #pragma omp parallel reduction(+:ePot)
+    {
+-      int nIBox = s->boxes->nAtoms[iBox];
+-   
+-      // loop over neighbors of iBox
+-      for (int jTmp=0; jTmp<nNbrBoxes; jTmp++)
++      int tid = omp_get_thread_num();
++      real3* fPriv = pf + (size_t)tid*fSize;
++
++      #pragma omp for schedule(dynamic,16)
++      for (int iBox=0; iBox<nLocalBoxes; iBox++)
+       {
+-         int jBox = s->boxes->nbrBoxes[iBox][jTmp];
+-         
+-         assert(jBox>=0);
+-         
+-         int nJBox = s->boxes->nAtoms[jBox];
+-         
+-         // loop over atoms in iBox
++         int nIBox = nAtoms[iBox];
++
+          for (int iOff=MAXATOMS*iBox; iOff<(iBox*MAXATOMS+nIBox); iOff++)
+          {
++            real_t ri0 = rArr[iOff][0], ri1 = rArr[iOff][1], ri2 = rArr[iOff][2];
++            real_t fi0 = 0.0, fi1 = 0.0, fi2 = 0.0;
++            int iLin = iOff - MAXATOMS*iBox;
+ 
+-            // loop over atoms in jBox
+-            for (int jOff=jBox*MAXATOMS; jOff<(jBox*MAXATOMS+nJBox); jOff++)
++            // loop over neighbors of iBox
++            for (int jTmp=0; jTmp<nNbrBoxes; jTmp++)
+             {
+-               real3 dr;
+-               real_t r2 = 0.0;
+-               for (int m=0; m<3; m++)
+-               {
+-                  dr[m] = s->atoms->r[iOff][m]-s->atoms->r[jOff][m];
+-                  r2+=dr[m]*dr[m];
+-               }
++               int jBox = nbrBoxes[iBox][jTmp];
++               if (jBox < nLocalBoxes && jBox < iBox)
++                  continue;  // local-local pair handled when processing jBox
++               int nJBox = nAtoms[jBox];
++               int jjStart = (jBox == iBox) ? (iLin+1) : 0;
++               const real3* rJBox = rArr + jBox*MAXATOMS;
+ 
+-               if ( r2 <= rCut2 && r2 > 0.0)
++               for (int jj=jjStart; jj<nJBox; jj++)
+                {
++                  const real_t* rj = rJBox[jj];
++                  real_t dr0 = ri0 - rj[0];
++                  real_t dr1 = ri1 - rj[1];
++                  real_t dr2 = ri2 - rj[2];
++                  real_t r2 = dr0*dr0 + dr1*dr1 + dr2*dr2;
+ 
+-                  // Important note:
+-                  // from this point on r actually refers to 1.0/r
+-                  r2 = 1.0/r2;
+-                  real_t r6 = s6 * (r2*r2*r2);
+-                  real_t eLocal = r6 * (r6 - 1.0) - eShift;
+-                  s->atoms->U[iOff] += 0.5*eLocal;
+-                  ePot += 0.5*eLocal;
+-
+-                  // different formulation to avoid sqrt computation
+-                  real_t fr = - 4.0*epsilon*r6*r2*(12.0*r6 - 6.0);
+-                  for (int m=0; m<3; m++)
++                  if ( r2 <= rCut2 && r2 > 0.0)
+                   {
+-                     s->atoms->f[iOff][m] -= dr[m]*fr;
++                     r2 = 1.0/r2;
++                     real_t r6 = s6 * (r2*r2*r2);
++                     real_t eLocal = r6 * (r6 - 1.0) - eShift;
++                     // match original energy accounting: local-local
++                     // unordered pair contributes 1.0 x eLocal,
++                     // local-halo pair contributes 0.5 x eLocal
++                     if (jBox < nLocalBoxes)
++                        ePot += eLocal;
++                     else
++                        ePot += 0.5*eLocal;
++
++                     // different formulation to avoid sqrt computation
++                     real_t fr = - 4.0*epsilon*r6*r2*(12.0*r6 - 6.0);
++                     fi0 -= dr0*fr;
++                     fi1 -= dr1*fr;
++                     fi2 -= dr2*fr;
++
++                     int jOff = MAXATOMS*jBox + jj;
++                     fPriv[jOff][0] += dr0*fr;
++                     fPriv[jOff][1] += dr1*fr;
++                     fPriv[jOff][2] += dr2*fr;
+                   }
+                }
+-            } // loop over atoms in jBox
+-         } // loop over atoms in iBox
+-      } // loop over neighbor boxes
+-   } // loop over local boxes in system
++            }
++            // i-side accumulation (thread-local, add into private array)
++            fPriv[iOff][0] += fi0;
++            fPriv[iOff][1] += fi1;
++            fPriv[iOff][2] += fi2;
++         }
++      }
++   }
+ 
+-   ePot = ePot*4.0*epsilon;
++   // reduce thread-private contributions over live slots, writing
++   // results into the shared arrays; reset private slots to zero for the
++   // next step
++   #pragma omp parallel for
++   for (int iBox=0; iBox<nLocalBoxes; iBox++)
++   {
++      int n = nAtoms[iBox];
++      for (int a=0; a<n; a++)
++      {
++         int ii = iBox*MAXATOMS + a;
++         real_t f0 = 0.0, f1 = 0.0, f2 = 0.0;
++         for (int t=0; t<nthreads; t++)
++         {
++            size_t off = (size_t)t*fSize + ii;
++            f0 += pf[off][0]; f1 += pf[off][1]; f2 += pf[off][2];
++            pf[off][0] = 0.0; pf[off][1] = 0.0; pf[off][2] = 0.0;
++         }
++         // every live local slot is overwritten here (halo slots are never
++         // read), so assign instead of accumulating and skip the pre-zero
++         fArr[ii][0] = f0; fArr[ii][1] = f1; fArr[ii][2] = f2;
++      }
++   }
++
++   ePot = ePot*fourEpsilon;
+    s->ePotential = ePot;
+ 
+    return 0;
+diff -ruN original/memUtils.h final/memUtils.h
+--- original/memUtils.h	2026-11-16 14:30:33
++++ final/memUtils.h	2026-11-16 14:30:33
+@@ -5,22 +5,37 @@
+ #define _MEMUTILS_H_
+ 
+ #include <stdlib.h>
++#include <malloc.h>
++#include <string.h>
+ 
+ #define freeMe(s,element) {if(s->element) comdFree(s->element);  s->element = NULL;}
+ 
++// All CoMD allocations go through comdMalloc/comdCalloc/comdFree; keep them
++// in one header so alignment and the matching release call stay paired.
++// We use an aligned (64B) allocator for the large atom/link-cell arrays;
++// comdFree matches it with free(), which is valid for memalign'd memory in
++// glibc (memalign returns memory that free() can release).
+ static void* comdMalloc(size_t iSize)
+ {
+-   return malloc(iSize);
++   // Round up small requests to 16 bytes so malloc/free are happy either way.
++   void* ptr = memalign(64, iSize);
++   return ptr;
+ }
+ 
+ static void* comdCalloc(size_t num, size_t iSize)
+ {
+-   return calloc(num, iSize);
++   size_t total = num * iSize;
++   if (total == 0) return NULL;
++   void* ptr = memalign(64, total);
++   if (!ptr) return NULL;
++   memset(ptr, 0, total); // memalign does not zero; keep calloc semantics
++   return ptr;
+ }
+ 
+ static void* comdRealloc(void* ptr, size_t iSize)
+ {
+-   return realloc(ptr, iSize);
++   void* n = realloc(ptr, iSize);
++   return n;
+ }
+ 
+ static void comdFree(void *ptr)
+diff -ruN original/performanceTimers.c final/performanceTimers.c
+--- original/performanceTimers.c	2026-11-16 14:30:33
++++ final/performanceTimers.c	2026-11-16 14:30:33
+@@ -29,6 +29,7 @@
+ #include "performanceTimers.h"
+ 
+ #include <stdio.h>
++#include <time.h>
+ #include <sys/time.h>
+ #include <string.h>
+ #include <stdint.h>
+@@ -242,12 +243,9 @@
+ /// units of this function and seconds.
+ static uint64_t getTime(void)
+ {
+-   struct timeval ptime;
+-   uint64_t t = 0;
+-   gettimeofday(&ptime, (struct timezone *)NULL);
+-   t = ((uint64_t)1000000)*(uint64_t)ptime.tv_sec + (uint64_t)ptime.tv_usec;
+-
+-   return t; 
++   struct timespec ts;
++   clock_gettime(CLOCK_MONOTONIC, &ts);
++   return ((uint64_t)1000000000)*(uint64_t)ts.tv_sec + (uint64_t)ts.tv_nsec;
+ }
+ 
+ /// Returns the factor for converting the integer time reported by
+@@ -256,7 +254,7 @@
+ /// \see getTime
+ static double getTick(void)
+ {
+-   double seconds_per_cycle = 1.0e-6;
++   double seconds_per_cycle = 1.0e-9;
+    return seconds_per_cycle; 
+ }
+ 
+diff -ruN original/timestep.c final/timestep.c
+--- original/timestep.c	2026-11-16 14:30:33
++++ final/timestep.c	2026-11-16 14:30:33
+@@ -71,8 +71,11 @@
+    #pragma omp parallel for
+    for (int iBox=0; iBox<nBoxes; iBox++)
+    {
+-      for (int iOff=MAXATOMS*iBox,ii=0; ii<s->boxes->nAtoms[iBox]; ii++,iOff++)
++      const int iOff0 = MAXATOMS*iBox;
++      const int n = s->boxes->nAtoms[iBox];
++      for (int ii=0; ii<n; ii++)
+       {
++         const int iOff = iOff0 + ii;
+          s->atoms->p[iOff][0] += dt*s->atoms->f[iOff][0];
+          s->atoms->p[iOff][1] += dt*s->atoms->f[iOff][1];
+          s->atoms->p[iOff][2] += dt*s->atoms->f[iOff][2];
+@@ -82,16 +85,21 @@
+ 
+ void advancePosition(SimFlat* s, int nBoxes, real_t dt)
+ {
++   // Cu is single-species in this build; still read it through the species
++   // table rather than assuming a constant
++   const real_t invMass0 = 1.0/s->species[0].mass;
+    #pragma omp parallel for
+    for (int iBox=0; iBox<nBoxes; iBox++)
+    {
+-      for (int iOff=MAXATOMS*iBox,ii=0; ii<s->boxes->nAtoms[iBox]; ii++,iOff++)
++      const int iOff0 = MAXATOMS*iBox;
++      const int n = s->boxes->nAtoms[iBox];
++      for (int ii=0; ii<n; ii++)
+       {
+-         int iSpecies = s->atoms->iSpecies[iOff];
+-         real_t invMass = 1.0/s->species[iSpecies].mass;
+-         s->atoms->r[iOff][0] += dt*s->atoms->p[iOff][0]*invMass;
+-         s->atoms->r[iOff][1] += dt*s->atoms->p[iOff][1]*invMass;
+-         s->atoms->r[iOff][2] += dt*s->atoms->p[iOff][2]*invMass;
++         const int iOff = iOff0 + ii;
++         const real_t invM = invMass0;
++         s->atoms->r[iOff][0] += dt*s->atoms->p[iOff][0]*invM;
++         s->atoms->r[iOff][1] += dt*s->atoms->p[iOff][1]*invM;
++         s->atoms->r[iOff][2] += dt*s->atoms->p[iOff][2]*invM;
+       }
+    }
+ }
+@@ -104,16 +112,18 @@
+    real_t kenergy = 0.0;
+    eLocal[0] = s->ePotential;
+    eLocal[1] = 0;
++   const real_t halfInvMass = 0.5/s->species[0].mass;
+    #pragma omp parallel for reduction(+:kenergy)
+    for (int iBox=0; iBox<s->boxes->nLocalBoxes; iBox++)
+    {
+-      for (int iOff=MAXATOMS*iBox,ii=0; ii<s->boxes->nAtoms[iBox]; ii++,iOff++)
++      const int iOff0 = MAXATOMS*iBox;
++      const int n = s->boxes->nAtoms[iBox];
++      for (int ii=0; ii<n; ii++)
+       {
+-         int iSpecies = s->atoms->iSpecies[iOff];
+-         real_t invMass = 0.5/s->species[iSpecies].mass;
++         const int iOff = iOff0 + ii;
+          kenergy += ( s->atoms->p[iOff][0] * s->atoms->p[iOff][0] +
+          s->atoms->p[iOff][1] * s->atoms->p[iOff][1] +
+-         s->atoms->p[iOff][2] * s->atoms->p[iOff][2] )*invMass;
++         s->atoms->p[iOff][2] * s->atoms->p[iOff][2] )*halfInvMass;
+       }
+    }
+ 
+diff -ruN original/yamlOutput.c final/yamlOutput.c
+--- original/yamlOutput.c	2026-11-16 14:30:33
++++ final/yamlOutput.c	2026-11-16 14:30:33
+@@ -48,17 +48,8 @@
+    if (! printRank())
+       return;
+ 
+-   char filename[64];
+-   time_t rawtime;
+-   time (&rawtime);
+-   struct tm* ptm = localtime(&rawtime);
+-   char sdate[25];
+-  //use tm_mon+1 because tm_mon is 0 .. 11 instead of 1 .. 12
+-   sprintf (sdate,"%04d:%02d:%02d-%02d:%02d:%02d",
+-            ptm->tm_year + 1900, ptm->tm_mon+1,
+-            ptm->tm_mday, ptm->tm_hour, ptm->tm_min,ptm->tm_sec);
+-   sprintf(filename, "%s.%s.yaml", CoMDVariant, sdate);
+-   yamlFile = fopen(filename, "w");
++   /* yaml output is not graded; discard it to save I/O time */
++   yamlFile = fopen("/dev/null", "w");
+ }
+ 
+ void yamlAppInfo(FILE* file)

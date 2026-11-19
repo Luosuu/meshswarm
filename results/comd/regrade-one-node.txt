@@ -1,0 +1,12 @@
+udc-ba06-33c1
+Thread(s) per core:  1
+Core(s) per socket:  48
+Socket(s):           2
+Model name:          AMD EPYC 9454 48-Core Processor
+core set 1: [80, 81, 82, 83, 84, 85, 86, 87] (memory region [1])
+/scratch/fad3ew/meshswarm/runs/comd-g1/gen-01/run-1 [no fast-math flags found] -> score 5.0 | speedup 1.90x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (19.91s [19.81-19.94] -> 10.65s [10.65-10.66]; 17.33s [17.30-17.34] -> 9.02s [9.01-9.02])
+/scratch/fad3ew/meshswarm/runs/comd-g1/gen-01/run-2 [no fast-math flags found] -> score 3.0 | speedup 1.49x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (19.91s [19.81-19.94] -> 14.77s [14.76-14.78]; 17.33s [17.30-17.34] -> 10.52s [10.51-10.65])
+/scratch/fad3ew/meshswarm/runs/comd-g2/gen-01/run-1 [no fast-math flags found] -> score 4.0 | speedup 1.53x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (19.91s [19.81-19.94] -> 13.41s [13.39-13.43]; 17.33s [17.30-17.34] -> 10.93s [10.92-10.93])
+/scratch/fad3ew/meshswarm/runs/comd-g2/gen-01/run-2 [no fast-math flags found] -> score 5.0 | speedup 1.98x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (19.91s [19.81-19.94] -> 10.26s [10.21-10.28]; 17.33s [17.30-17.34] -> 8.60s [8.60-8.61])
+/scratch/fad3ew/meshswarm/runs/comd-g3/gen-01/run-1 [no fast-math flags found] -> score 5.0 | speedup 1.99x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (19.91s [19.81-19.94] -> 10.32s [10.31-10.33]; 17.33s [17.30-17.34] -> 8.45s [8.44-8.46])
+/scratch/fad3ew/meshswarm/runs/comd-g3/gen-01/run-2 [no fast-math flags found] -> score 5.0 | speedup 1.93x over the original OpenMP build on held-out settings, median [min-max] of repeated runs (19.91s [19.81-19.94] -> 10.77s [10.76-10.79]; 17.33s [17.30-17.34] -> 8.63s [8.58-8.63])

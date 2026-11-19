@@ -1,0 +1,419 @@
+diff -ruN original/amr.c final/amr.c
+--- original/amr.c	2026-11-16 14:30:33
++++ final/amr.c	2026-11-16 14:30:33
+@@ -60,6 +60,8 @@
+ **********************************************************************************/
+ 
+ #include <par-res-kern_general.h>
++#include <omp.h>
++#include <stdlib.h>
+ 
+ #if DOUBLE
+   #define DTYPE   double
+@@ -78,6 +80,8 @@
+ /* define shorthand for indexing multi-dimensional arrays                       */
+ #define IN(i,j)         in[i+(j)*(n)]
+ #define OUT(i,j)        out[i+(j)*(n)]
++#define IN2(i,j)        in2[i+(j)*(n)]
++#define IN2_R(g,i,j)    in2_r[g][i+(j)*(n_r_true)]
+ #define IN_R(g,i,j)     in_r[g][i+(j)*(n_r_true)]
+ #define ING_R(i,j)      ing_r[i+(j)*(n_r_true)]
+ #define OUT_R(g,i,j)    out_r[g][i+(j)*(n_r_true)]
+@@ -90,12 +94,13 @@
+ /* use two-stage, bi-linear interpolation from background grid to refinement    */
+ void interpolate(DTYPE *ing_r, DTYPE *in, long n, long n_r_true, 
+                  long istart_r, long jstart_r, long expand,
+-                 DTYPE h_r) {
++                 DTYPE h_r, DTYPE *xcopy) {
+   long ir, jr, ib, jrb, jrb1, jb, iend_r, jend_r;
+   DTYPE xr, xb, yr, yb;
+ 
+   if (expand==1){
+     /* simply copy background grid values to refinement if same resolution      */
++    #pragma omp parallel for schedule(static) private(ir)
+     for (jr=0; jr<n_r_true; jr++) for (ir=0; ir<n_r_true; ir++)
+       ING_R(ir,jr) = IN(ir+istart_r,jr+jstart_r);
+   } 
+@@ -103,7 +108,9 @@
+     iend_r = istart_r+(n_r_true-1)/expand;
+     jend_r = jstart_r+(n_r_true-1)/expand;
+     /* First, interpolate in x-direction                                        */
+-    for (jr=0,jb=jstart_r; jr<n_r_true; jr+=expand,jb++) {
++    #pragma omp parallel for schedule(static) private(jb, ir, xr, xb, ib)
++    for (jr=0; jr<n_r_true; jr+=expand) {
++      jb = jstart_r + jr/expand;
+       for (ir=0; ir<n_r_true-1; ir++) {
+         xr = istart_r+h_r*(DTYPE)ir;
+         ib = (long)xr;
+@@ -113,18 +120,46 @@
+       ING_R(n_r_true-1,jr) = IN(iend_r,jb);
+     }
+ 
+-    /* Next, interpolate in y-direction                                         */
+-    for (jr=0; jr<n_r_true-1; jr++) {
+-      yr = h_r*(DTYPE)jr;
+-      jb = (long)yr;
+-      jrb = jb*expand;
+-      jrb1 = (jb+1)*expand;
+-      yb = (DTYPE)jb;
+-      for (ir=0; ir<n_r_true; ir++) {
+-        ING_R(ir,jr) = ING_R(ir,jrb1)*(yr-yb) + ING_R(ir,jrb)*(yb+(DTYPE)1.0-yr);
++    /* Next, interpolate in y-direction.
++       Each output row jr reads only source rows jrb and jrb1 (both multiples of
++       expand). Source rows are shared between up to expand output rows, and the
++       y-loop also overwrites them in place, so a thread could read a row after
++       another thread has overwritten it. We therefore keep the x-interpolated
++       values in a private copy for the rows that are sources.               */
++    {
++      /* keep the x-interpolated source rows for the y-pass. Only rows that
++         are multiples of 'expand' are read (jrb and jrb1), so only those
++         rows are copied. The buffer is provided by the caller (allocated
++         once); if it is missing, fall back to a local full-grid copy.      */
++      int local_xcopy = 0;
++      if (!xcopy) {
++        xcopy = (DTYPE *) malloc((size_t)n_r_true*(size_t)n_r_true*sizeof(DTYPE));
++        if (!xcopy) {
++          fprintf(stderr, "ERROR: could not allocate interpolation scratch\n");
++          exit(EXIT_FAILURE);
++        }
++        local_xcopy = 1;
++        memcpy(xcopy, ing_r, (size_t)n_r_true*(size_t)n_r_true*sizeof(DTYPE));
++      } else {
++        #pragma omp parallel for schedule(static) private(jr)
++        for (jr=0; jr<n_r_true; jr+=expand)
++          memcpy(xcopy+(size_t)jr*(size_t)n_r_true, ing_r+(size_t)jr*(size_t)n_r_true,
++                 (size_t)n_r_true*sizeof(DTYPE));
+       }
+-      /* note that (yr-yb) and (yb+(DTYPE)1.0-yr) can be hoisted out of the loop,
+-         so in the performance computation we assign 3 flops per point           */
++      #define XC(i,j) xcopy[(i)+(j)*(n_r_true)]
++      #pragma omp parallel for schedule(static) private(yr, jb, jrb, jrb1, yb, ir)
++      for (jr=0; jr<n_r_true-1; jr++) {
++        yr = h_r*(DTYPE)jr;
++        jb = (long)yr;
++        jrb = jb*expand;
++        jrb1 = (jb+1)*expand;
++        yb = (DTYPE)jb;
++        for (ir=0; ir<n_r_true; ir++) {
++          ING_R(ir,jr) = XC(ir,jrb1)*(yr-yb) + XC(ir,jrb)*(yb+(DTYPE)1.0-yr);
++        }
++      }
++      #undef XC
++      if (local_xcopy) free(xcopy);
+     }
+   }
+ }
+@@ -169,14 +204,19 @@
+   int    stencil_size;      /* number of points in stencil                         */
+   DTYPE  * RESTRICT in;     /* background grid input values                        */
+   DTYPE  * RESTRICT out;    /* background grid output values                       */
++  DTYPE  * RESTRICT in2;    /* background grid input scratch (double buffering)    */
+   DTYPE  * RESTRICT in_r[4];/* refinement grid input values                        */
+   DTYPE  * RESTRICT out_r[4];/* refinement grid output values                      */
++  DTYPE  * RESTRICT in2_r[4];/* refinement input scratch (double buffering)        */
++  DTYPE  * xcopy = NULL;      /* interpolation y-pass scratch (one refinement grid)   */
+   long   total_length;      /* total required length to store bg grid values       */
+   long   total_length_r;    /* total required length to store refinement values    */
+   DTYPE  weight[2*RADIUS+1][2*RADIUS+1]; /* weights of points in the stencil       */
+   DTYPE  weight_r[2*RADIUS+1][2*RADIUS+1]; /* weights of points in the stencil     */
+   int    validate=1;        /* tracks correct solution on all grids                */
+ 
++  setenv("OMP_WAIT_POLICY", "active", 0);
++  setenv("GOMP_SPINCOUNT", "10000000", 0);
+   printf("Parallel Research Kernels Version %s\n", PRKVERSION);
+   printf("Serial AMR stencil execution on 2D grid\n");
+ 
+@@ -290,6 +330,20 @@
+     in_r[g]  = in_r[g-1]  +  n_r_true*n_r_true;
+     out_r[g] = out_r[g-1] +  n_r_true*n_r_true;
+   }
++  in2 = (DTYPE *) prk_malloc(total_length);
++  in2_r[0] = (DTYPE *) prk_malloc(total_length_r);
++  if (!in2 || !in2_r[0]) {
++    printf("ERROR: could not allocate space for double-buffer scratch\n");
++    exit(EXIT_FAILURE);
++  }
++  for (g=1; g<4; g++) in2_r[g] = in2_r[g-1] + n_r_true*n_r_true;
++  if (refine_level > 0) {
++    xcopy = (DTYPE *) prk_malloc((size_t)n_r_true*(size_t)n_r_true*sizeof(DTYPE));
++    if (!xcopy) {
++      printf("ERROR: could not allocate interpolation scratch\n");
++      exit(EXIT_FAILURE);
++    }
++  }
+ 
+   /* fill the stencil weights to reflect a discrete divergence operator     */
+   for (jj=-RADIUS; jj<=RADIUS; jj++) {
+@@ -356,8 +410,10 @@
+   printf("   Sub-iterations         = %d\n", sub_iterations);
+ 
+   /* intialize the input and output arrays                                     */
++  #pragma omp parallel for schedule(static) private(i)
+   for (j=0; j<n; j++) for (i=0; i<n; i++) 
+     IN(i,j)  = COEFX*i+COEFY*j+BUMP(i,j);
++  #pragma omp parallel for schedule(static) private(i)
+   for (j=RADIUS; j<n-RADIUS; j++) for (i=RADIUS; i<n-RADIUS; i++) 
+     OUT(i,j) = (DTYPE)0.0;
+ 
+@@ -369,8 +425,10 @@
+ 
+   /* intialize the refinement arrays                                           */
+   for (g=0; g<4; g++) {
+-    for (j=0; j<n_r_true; j++) for (i=0; i<n_r_true; i++) 
++    #pragma omp parallel for schedule(static) private(i)
++    for (j=0; j<n_r_true; j++) for (i=0; i<n_r_true; i++)
+       IN_R(g,i,j)  = (DTYPE)0.0;
++    #pragma omp parallel for schedule(static) private(i)
+     for (j=RADIUS; j<n_r_true-RADIUS; j++) for (i=RADIUS; i<n_r_true-RADIUS; i++) 
+       OUT_R(g,i,j) = (DTYPE)0.0;
+   }
+@@ -387,140 +445,146 @@
+       /* a specific refinement has come to life                                */
+       g=(iter/period)%4;
+       num_interpolations++;
+-      interpolate(in_r[g], in, n, n_r_true, istart_r[g], jstart_r[g], expand, h_r);
++      interpolate(in_r[g], in, n, n_r_true, istart_r[g], jstart_r[g], expand, h_r, xcopy);
+     }
+ 
+     if ((iter%period) < duration) {
+       for (sub_iter=0; sub_iter<sub_iterations; sub_iter++) {
+         if (!tiling) {
++          /* border rows: input gets +1.0 only */
++          #pragma omp parallel for schedule(static) private(i)
++          for (j=0; j<RADIUS; j++) {
++            for (i=0; i<n_r_true; i++) IN2_R(g,i,j) = IN_R(g,i,j) + (DTYPE)1.0;
++          }
++          #pragma omp parallel for schedule(static) private(i)
++          for (j=n_r_true-RADIUS; j<n_r_true; j++) {
++            for (i=0; i<n_r_true; i++) IN2_R(g,i,j) = IN_R(g,i,j) + (DTYPE)1.0;
++          }
++          /* interior rows */
++          #pragma omp parallel for schedule(static) private(i)
+           for (j=RADIUS; j<n_r_true-RADIUS; j++) {
++            DTYPE *inrow = &IN_R(g,0,j);
++            DTYPE *in2row = &IN2_R(g,0,j);
++            DTYPE *outrow = &OUT_R(g,0,j);
++            const DTYPE wr0m2=WEIGHT_R(0,-2), wr0m1=WEIGHT_R(0,-1), wr00=WEIGHT_R(0,0);
++            const DTYPE wr01=WEIGHT_R(0,1), wr02=WEIGHT_R(0,2);
++            const DTYPE wim20=WEIGHT_R(-2,0), wim10=WEIGHT_R(-1,0), wip10=WEIGHT_R(1,0), wip20=WEIGHT_R(2,0);
++            for (i=0; i<RADIUS; i++) in2row[i] = inrow[i] + (DTYPE)1.0;
++            for (i=n_r_true-RADIUS; i<n_r_true; i++) in2row[i] = inrow[i] + (DTYPE)1.0;
++            #pragma GCC ivdep
+             for (i=RADIUS; i<n_r_true-RADIUS; i++) {
+-              #if STAR
+-                #if LOOPGEN
+-                  #include "loop_body_star_amr.incl"
+-                #else
+-                  for (jj=-RADIUS; jj<=RADIUS; jj++)  OUT_R(g,i,j) += WEIGHT_R(0,jj)*IN_R(g,i,j+jj);
+-                  for (ii=-RADIUS; ii<0; ii++)        OUT_R(g,i,j) += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
+-                  for (ii=1; ii<=RADIUS; ii++)        OUT_R(g,i,j) += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
+-                #endif
+-              #else 
+-                #if LOOPGEN
+-                  #include "loop_body_compact_amr.incl"
+-                #else
+-                  /* would like to be able to un_roll this loop, but compiler will ignore  */
+-                  for (jj=-RADIUS; jj<=RADIUS; jj++) 
+-		    for (ii=-RADIUS; ii<=RADIUS; ii++)  OUT_R(g,i,j) += WEIGHT_R(ii,jj)*IN_R(g,i+ii,j+jj);
+-                #endif
+-              #endif
++              DTYPE acc = outrow[i];
++              acc += wr0m2*IN_R(g,i,j-2) + wr0m1*IN_R(g,i,j-1) + wr00*inrow[i] + wr01*IN_R(g,i,j+1) + wr02*IN_R(g,i,j+2);
++              acc += wim20*IN_R(g,i-2,j) + wim10*IN_R(g,i-1,j) + wip10*IN_R(g,i+1,j) + wip20*IN_R(g,i+2,j);
++              outrow[i] = acc;
++              in2row[i] = inrow[i] + (DTYPE)1.0 + FEEDBACK*acc;
+             }
+           }
++          { DTYPE *tmp = in_r[g]; in_r[g] = in2_r[g]; in2_r[g] = tmp; }
+         }
+         else {
++          #pragma omp parallel for schedule(dynamic) private(it, j, i, ii, jj)
+           for (jt=RADIUS; jt<n_r_true-RADIUS; jt+=tile_size) {
+             for (it=RADIUS; it<n_r_true-RADIUS; it+=tile_size) {
+               for (j=jt; j<MIN(n_r_true-RADIUS,jt+tile_size); j++) {
+                 for (i=it; i<MIN(n_r_true-RADIUS,it+tile_size); i++) {
+-                  #if STAR
+-                    #if LOOPGEN
+-                      #include "loop_body_star_amr.incl"
+-                    #else
+-                      for (jj=-RADIUS; jj<=RADIUS; jj++)  OUT_R(g,i,j) += WEIGHT_R(0,jj)*IN_R(g,i,j+jj);
+-                      for (ii=-RADIUS; ii<0; ii++)        OUT_R(g,i,j) += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
+-                      for (ii=1; ii<=RADIUS; ii++)        OUT_R(g,i,j) += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
+-                    #endif
+-                  #else 
+-                    #if LOOPGEN
+-                      #include "loop_body_compact_amr.incl"
+-                    #else
+-                      /* would like to be able to unroll this loop, but compiler will ignore  */
+-                      for (jj=-RADIUS; jj<=RADIUS; jj++) 
+-			for (ii=-RADIUS; ii<=RADIUS; ii++)  OUT_R(g,i,j) += WEIGHT_R(ii,jj)*IN_R(g,i+ii,j+jj);
+-                    #endif
+-                  #endif
++                  { DTYPE acc = OUT_R(g,i,j);
++                  for (jj=-RADIUS; jj<=RADIUS; jj++)  acc += WEIGHT_R(0,jj)*IN_R(g,i,j+jj);
++                  for (ii=-RADIUS; ii<0; ii++)        acc += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
++                  for (ii=1; ii<=RADIUS; ii++)        acc += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
++                  OUT_R(g,i,j) = acc; }
+                 }
+               }
+             }
+           }
++          #pragma omp parallel for schedule(static) private(i)
++          for (j=0; j<n_r_true; j++) {
++            int in_interior_j = (j>=RADIUS && j<n_r_true-RADIUS);
++            for (i=0; i<n_r_true; i++) {
++              if (in_interior_j && i>=RADIUS && i<n_r_true-RADIUS)
++                IN2_R(g,i,j) = IN_R(g,i,j) + (DTYPE)1.0 + FEEDBACK*OUT_R(g,i,j);
++              else
++                IN2_R(g,i,j) = IN_R(g,i,j) + (DTYPE)1.0;
++            }
++          }
++          { DTYPE *tmp = in_r[g]; in_r[g] = in2_r[g]; in2_r[g] = tmp; }
+         }
+-        /* add constant to solution to force refresh of neighbor data, if any        */
+-        for (j=0; j<n_r_true; j++) for (i=0; i<n_r_true; i++) IN_R(g,i,j)+= (DTYPE)1.0;
+-        /* feed the solution back into the input field, so the next sweep sees new data */
+-        for (j=RADIUS; j<n_r_true-RADIUS; j++) for (i=RADIUS; i<n_r_true-RADIUS; i++)
+-          IN_R(g,i,j) += FEEDBACK*OUT_R(g,i,j);
+       }
+     }
+ 
+     /* Apply the stencil operator to background grid                           */
+ 
+     if (!tiling) {
++      #pragma omp parallel for schedule(static) private(i)
++      for (j=0; j<RADIUS; j++) {
++        for (i=0; i<n; i++) IN2(i,j) = IN(i,j) + (DTYPE)1.0;
++      }
++      #pragma omp parallel for schedule(static) private(i)
++      for (j=n-RADIUS; j<n; j++) {
++        for (i=0; i<n; i++) IN2(i,j) = IN(i,j) + (DTYPE)1.0;
++      }
++      #pragma omp parallel for schedule(static) private(i)
+       for (j=RADIUS; j<n-RADIUS; j++) {
++        DTYPE *inrow = &IN(0,j);
++        DTYPE *in2row = &IN2(0,j);
++        DTYPE *outrow = &OUT(0,j);
++        const DTYPE wr0m2=WEIGHT(0,-2), wr0m1=WEIGHT(0,-1), wr00=WEIGHT(0,0);
++        const DTYPE wr01=WEIGHT(0,1), wr02=WEIGHT(0,2);
++        const DTYPE wim20=WEIGHT(-2,0), wim10=WEIGHT(-1,0), wip10=WEIGHT(1,0), wip20=WEIGHT(2,0);
++        for (i=0; i<RADIUS; i++) in2row[i] = inrow[i] + (DTYPE)1.0;
++        for (i=n-RADIUS; i<n; i++) in2row[i] = inrow[i] + (DTYPE)1.0;
++        #pragma GCC ivdep
+         for (i=RADIUS; i<n-RADIUS; i++) {
+-          #if STAR
+-            #if LOOPGEN
+-              #include "loop_body_star.incl"
+-            #else
+-              for (jj=-RADIUS; jj<=RADIUS; jj++)  OUT(i,j) += WEIGHT(0,jj)*IN(i,j+jj);
+-              for (ii=-RADIUS; ii<0; ii++)        OUT(i,j) += WEIGHT(ii,0)*IN(i+ii,j);
+-              for (ii=1; ii<=RADIUS; ii++)        OUT(i,j) += WEIGHT(ii,0)*IN(i+ii,j);
+-            #endif
+-          #else 
+-            #if LOOPGEN
+-              #include "loop_body_compact.incl"
+-            #else
+-              /* would like to be able to unroll this loop, but compiler will ignore  */
+-              for (jj=-RADIUS; jj<=RADIUS; jj++) 
+-              for (ii=-RADIUS; ii<=RADIUS; ii++)  OUT(i,j) += WEIGHT(ii,jj)*IN(i+ii,j+jj);
+-            #endif
+-          #endif
++          DTYPE acc = outrow[i];
++          acc += wr0m2*IN(i,j-2) + wr0m1*IN(i,j-1) + wr00*inrow[i] + wr01*IN(i,j+1) + wr02*IN(i,j+2);
++          acc += wim20*IN(i-2,j) + wim10*IN(i-1,j) + wip10*IN(i+1,j) + wip20*IN(i+2,j);
++          outrow[i] = acc;
++          in2row[i] = inrow[i] + (DTYPE)1.0 + FEEDBACK*acc;
+         }
+       }
+     }
+     else {
++      #pragma omp parallel for schedule(dynamic) private(it, j, i, ii, jj)
+       for (jt=RADIUS; jt<n-RADIUS; jt+=tile_size) {
+         for (it=RADIUS; it<n-RADIUS; it+=tile_size) {
+           for (j=jt; j<MIN(n-RADIUS,jt+tile_size); j++) {
+             for (i=it; i<MIN(n-RADIUS,it+tile_size); i++) {
+-              #if STAR
+-                #if LOOPGEN
+-                  #include "loop_body_star.incl"
+-                #else
+-                  for (jj=-RADIUS; jj<=RADIUS; jj++)  OUT(i,j) += WEIGHT(0,jj)*IN(i,j+jj);
+-                  for (ii=-RADIUS; ii<0; ii++)        OUT(i,j) += WEIGHT(ii,0)*IN(i+ii,j);
+-                  for (ii=1; ii<=RADIUS; ii++)        OUT(i,j) += WEIGHT(ii,0)*IN(i+ii,j);
+-                #endif
+-              #else 
+-                #if LOOPGEN
+-                  #include "loop_body_compact.incl"
+-                #else
+-                  /* would like to be able to unroll this loop, but compiler will ignore  */
+-                  for (jj=-RADIUS; jj<=RADIUS; jj++) 
+-                  for (ii=-RADIUS; ii<=RADIUS; ii++)  OUT(i,j) += WEIGHT(ii,jj)*IN(i+ii,j+jj);
+-                #endif
+-              #endif
++              { DTYPE acc = OUT(i,j);
++              for (jj=-RADIUS; jj<=RADIUS; jj++)  acc += WEIGHT(0,jj)*IN(i,j+jj);
++              for (ii=-RADIUS; ii<0; ii++)        acc += WEIGHT(ii,0)*IN(i+ii,j);
++              for (ii=1; ii<=RADIUS; ii++)        acc += WEIGHT(ii,0)*IN(i+ii,j);
++              OUT(i,j) = acc; }
+             }
+           }
+         }
+       }
++      #pragma omp parallel for schedule(static) private(i)
++      for (j=0; j<n; j++) {
++        int in_interior_j = (j>=RADIUS && j<n-RADIUS);
++        for (i=0; i<n; i++) {
++          if (in_interior_j && i>=RADIUS && i<n-RADIUS)
++            IN2(i,j) = IN(i,j) + (DTYPE)1.0 + FEEDBACK*OUT(i,j);
++          else
++            IN2(i,j) = IN(i,j) + (DTYPE)1.0;
++        }
++      }
+     }
++    { DTYPE *tmp = in; in = in2; in2 = tmp; }
+ 
+-    /* add constant to solution to force refresh of neighbor data, if any        */
+-    for (j=0; j<n; j++) for (i=0; i<n; i++) IN(i,j)+= (DTYPE)1.0;
+-    /* feed the solution back into the input field, so the next sweep sees new data */
+-    for (j=RADIUS; j<n-RADIUS; j++) for (i=RADIUS; i<n-RADIUS; i++)
+-      IN(i,j) += FEEDBACK*OUT(i,j);
+-
+   } /* end of iterations                                                         */
+ 
+   stencil_time = wtime() - stencil_time;
+ 
+   /* compute normalized L1 solution norm on background grid                      */
+   norm = norm_in = (DTYPE) 0.0;
++  #pragma omp parallel for schedule(static) reduction(+:norm) private(i)
+   for (j=RADIUS; j<n-RADIUS; j++) for (i=RADIUS; i<n-RADIUS; i++) {
+     norm += (DTYPE)ABS(OUT(i,j));
+   }
+   norm /= f_active_points;
+ 
+   /* compute normalized L1 input field norm on background grid                   */
++  #pragma omp parallel for schedule(static) reduction(+:norm_in) private(i)
+   for (j=0; j<n; j++) for (i=0; i<n; i++) {
+     norm_in += (DTYPE)ABS(IN(i,j));
+   }
+@@ -529,12 +593,14 @@
+   for (g=0; g<4; g++) {
+     norm_r[g] = norm_in_r[g] = (DTYPE) 0.0;
+     /* compute normalized L1 solution norm on refinements                        */
++    #pragma omp parallel for schedule(static) reduction(+:norm_r[g]) private(i)
+     for (j=RADIUS; j<n_r_true-RADIUS; j++) for (i=RADIUS; i<n_r_true-RADIUS; i++) {
+       norm_r[g] += (DTYPE)ABS(OUT_R(g,i,j));
+     }
+     norm_r[g] /= f_active_points_r;
+ 
+     /* compute normalized L1 input field norms on refinements                    */
++    #pragma omp parallel for schedule(static) reduction(+:norm_in_r[g]) private(i)
+     for (j=0; j<n_r_true; j++) for (i=0; i<n_r_true; i++) {
+       norm_in_r[g] += (DTYPE)ABS(IN_R(g,i,j));
+     }
+diff -ruN original/build.sh final/build.sh
+--- original/build.sh	1969-12-31 19:00:00
++++ final/build.sh	2026-11-16 14:30:33
+@@ -0,0 +1,4 @@
++#!/bin/bash
++# Builds ./amr. Change this as you like; the grader runs it as `bash build.sh`.
++set -e
++${CC:-gcc} -O3 -march=native -std=gnu99 -DPRKVERSION='"2.17"' -DDOUBLE=1 -DRADIUS=2 -DSTAR=1 -DLOOPGEN=0 -DVERBOSE=0 -DRESTRICT_KEYWORD=1 -fopenmp -I. amr.c wtime.c -lm -o amr

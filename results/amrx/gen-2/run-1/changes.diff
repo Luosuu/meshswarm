@@ -1,0 +1,233 @@
+diff -ruN original/amr.c final/amr.c
+--- original/amr.c	2026-11-16 14:30:33
++++ final/amr.c	2026-11-16 14:30:33
+@@ -96,14 +96,20 @@
+ 
+   if (expand==1){
+     /* simply copy background grid values to refinement if same resolution      */
+-    for (jr=0; jr<n_r_true; jr++) for (ir=0; ir<n_r_true; ir++)
+-      ING_R(ir,jr) = IN(ir+istart_r,jr+jstart_r);
++    #pragma omp parallel for private(jr,ir) schedule(static)
++    for (jr=0; jr<n_r_true; jr++) {
++      #pragma omp simd
++      for (ir=0; ir<n_r_true; ir++)
++        ING_R(ir,jr) = IN(ir+istart_r,jr+jstart_r);
++    }
+   } 
+   else {
+     iend_r = istart_r+(n_r_true-1)/expand;
+     jend_r = jstart_r+(n_r_true-1)/expand;
+     /* First, interpolate in x-direction                                        */
+-    for (jr=0,jb=jstart_r; jr<n_r_true; jr+=expand,jb++) {
++    #pragma omp parallel for private(ir,xr,ib,xb,jb) schedule(static)
++    for (jr=0; jr<n_r_true; jr+=expand) {
++      jb = jstart_r + jr/expand;
+       for (ir=0; ir<n_r_true-1; ir++) {
+         xr = istart_r+h_r*(DTYPE)ir;
+         ib = (long)xr;
+@@ -114,17 +120,16 @@
+     }
+ 
+     /* Next, interpolate in y-direction                                         */
+-    for (jr=0; jr<n_r_true-1; jr++) {
+-      yr = h_r*(DTYPE)jr;
+-      jb = (long)yr;
+-      jrb = jb*expand;
+-      jrb1 = (jb+1)*expand;
+-      yb = (DTYPE)jb;
+-      for (ir=0; ir<n_r_true; ir++) {
++    #pragma omp parallel for private(jr,yr,jb,jrb,jrb1,yb) schedule(static)
++    for (ir=0; ir<n_r_true; ir++) {
++      for (jr=0; jr<n_r_true-1; jr++) {
++        yr = h_r*(DTYPE)jr;
++        jb = (long)yr;
++        jrb = jb*expand;
++        jrb1 = (jb+1)*expand;
++        yb = (DTYPE)jb;
+         ING_R(ir,jr) = ING_R(ir,jrb1)*(yr-yb) + ING_R(ir,jrb)*(yb+(DTYPE)1.0-yr);
+       }
+-      /* note that (yr-yb) and (yb+(DTYPE)1.0-yr) can be hoisted out of the loop,
+-         so in the performance computation we assign 3 flops per point           */
+     }
+   }
+ }
+@@ -356,10 +361,18 @@
+   printf("   Sub-iterations         = %d\n", sub_iterations);
+ 
+   /* intialize the input and output arrays                                     */
+-  for (j=0; j<n; j++) for (i=0; i<n; i++) 
+-    IN(i,j)  = COEFX*i+COEFY*j+BUMP(i,j);
+-  for (j=RADIUS; j<n-RADIUS; j++) for (i=RADIUS; i<n-RADIUS; i++) 
+-    OUT(i,j) = (DTYPE)0.0;
++  #pragma omp parallel for private(j,i) schedule(static)
++  for (j=0; j<n; j++) {
++    #pragma omp simd
++    for (i=0; i<n; i++)
++      IN(i,j)  = COEFX*i+COEFY*j+BUMP(i,j);
++  }
++  #pragma omp parallel for private(j,i) schedule(static)
++  for (j=RADIUS; j<n-RADIUS; j++) {
++    #pragma omp simd
++    for (i=RADIUS; i<n-RADIUS; i++)
++      OUT(i,j) = (DTYPE)0.0;
++  }
+ 
+   /* compute layout of refinements (bottom left background grid coordinate     */
+   istart_r[0] = istart_r[2] = 0;
+@@ -369,10 +382,19 @@
+ 
+   /* intialize the refinement arrays                                           */
+   for (g=0; g<4; g++) {
+-    for (j=0; j<n_r_true; j++) for (i=0; i<n_r_true; i++) 
+-      IN_R(g,i,j)  = (DTYPE)0.0;
+-    for (j=RADIUS; j<n_r_true-RADIUS; j++) for (i=RADIUS; i<n_r_true-RADIUS; i++) 
+-      OUT_R(g,i,j) = (DTYPE)0.0;
++    /* zero-init IN_R: grids that never fire an interpolation are read by the final norms */
++    #pragma omp parallel for private(j,i) schedule(static)
++    for (j=0; j<n_r_true; j++) {
++      #pragma omp simd
++      for (i=0; i<n_r_true; i++)
++        IN_R(g,i,j) = (DTYPE)0.0;
++    }
++    #pragma omp parallel for private(j,i) schedule(static)
++    for (j=RADIUS; j<n_r_true-RADIUS; j++) {
++      #pragma omp simd
++      for (i=RADIUS; i<n_r_true-RADIUS; i++)
++        OUT_R(g,i,j) = (DTYPE)0.0;
++    }
+   }
+   stencil_time = 0.0; /* silence compiler warning */
+ 
+@@ -393,15 +415,23 @@
+     if ((iter%period) < duration) {
+       for (sub_iter=0; sub_iter<sub_iterations; sub_iter++) {
+         if (!tiling) {
++          #pragma omp parallel for private(j,i,jj,ii) schedule(static)
+           for (j=RADIUS; j<n_r_true-RADIUS; j++) {
++            #pragma omp simd simdlen(4)
+             for (i=RADIUS; i<n_r_true-RADIUS; i++) {
+               #if STAR
+                 #if LOOPGEN
+                   #include "loop_body_star_amr.incl"
+                 #else
+-                  for (jj=-RADIUS; jj<=RADIUS; jj++)  OUT_R(g,i,j) += WEIGHT_R(0,jj)*IN_R(g,i,j+jj);
+-                  for (ii=-RADIUS; ii<0; ii++)        OUT_R(g,i,j) += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
+-                  for (ii=1; ii<=RADIUS; ii++)        OUT_R(g,i,j) += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
++                  OUT_R(g,i,j) += WEIGHT_R(0,-2)*IN_R(g,i,j-2);
++                  OUT_R(g,i,j) += WEIGHT_R(0,-1)*IN_R(g,i,j-1);
++                  OUT_R(g,i,j) += WEIGHT_R(0, 0)*IN_R(g,i,j+0);
++                  OUT_R(g,i,j) += WEIGHT_R(0, 1)*IN_R(g,i,j+1);
++                  OUT_R(g,i,j) += WEIGHT_R(0, 2)*IN_R(g,i,j+2);
++                  OUT_R(g,i,j) += WEIGHT_R(-2,0)*IN_R(g,i-2,j);
++                  OUT_R(g,i,j) += WEIGHT_R(-1,0)*IN_R(g,i-1,j);
++                  OUT_R(g,i,j) += WEIGHT_R( 1,0)*IN_R(g,i+1,j);
++                  OUT_R(g,i,j) += WEIGHT_R( 2,0)*IN_R(g,i+2,j);
+                 #endif
+               #else 
+                 #if LOOPGEN
+@@ -442,26 +472,38 @@
+             }
+           }
+         }
+-        /* add constant to solution to force refresh of neighbor data, if any        */
+-        for (j=0; j<n_r_true; j++) for (i=0; i<n_r_true; i++) IN_R(g,i,j)+= (DTYPE)1.0;
+-        /* feed the solution back into the input field, so the next sweep sees new data */
+-        for (j=RADIUS; j<n_r_true-RADIUS; j++) for (i=RADIUS; i<n_r_true-RADIUS; i++)
+-          IN_R(g,i,j) += FEEDBACK*OUT_R(g,i,j);
++        /* add constant fused with feedback */
++        #pragma omp parallel for private(j,i) schedule(static)
++        for (j=0; j<n_r_true; j++) {
++          #pragma omp simd
++          for (i=0; i<n_r_true; i++) {
++            IN_R(g,i,j) += (DTYPE)1.0;
++            if (i>=RADIUS && i<n_r_true-RADIUS && j>=RADIUS && j<n_r_true-RADIUS) IN_R(g,i,j) += FEEDBACK*OUT_R(g,i,j);
++          }
++        }
+       }
+     }
+ 
+     /* Apply the stencil operator to background grid                           */
+ 
+     if (!tiling) {
++      #pragma omp parallel for private(j,i,jj,ii) schedule(static)
+       for (j=RADIUS; j<n-RADIUS; j++) {
++        #pragma omp simd simdlen(4)
+         for (i=RADIUS; i<n-RADIUS; i++) {
+           #if STAR
+             #if LOOPGEN
+               #include "loop_body_star.incl"
+             #else
+-              for (jj=-RADIUS; jj<=RADIUS; jj++)  OUT(i,j) += WEIGHT(0,jj)*IN(i,j+jj);
+-              for (ii=-RADIUS; ii<0; ii++)        OUT(i,j) += WEIGHT(ii,0)*IN(i+ii,j);
+-              for (ii=1; ii<=RADIUS; ii++)        OUT(i,j) += WEIGHT(ii,0)*IN(i+ii,j);
++              OUT(i,j) += WEIGHT(0,-2)*IN(i,j-2);
++              OUT(i,j) += WEIGHT(0,-1)*IN(i,j-1);
++              OUT(i,j) += WEIGHT(0, 0)*IN(i,j+0);
++              OUT(i,j) += WEIGHT(0, 1)*IN(i,j+1);
++              OUT(i,j) += WEIGHT(0, 2)*IN(i,j+2);
++              OUT(i,j) += WEIGHT(-2,0)*IN(i-2,j);
++              OUT(i,j) += WEIGHT(-1,0)*IN(i-1,j);
++              OUT(i,j) += WEIGHT( 1,0)*IN(i+1,j);
++              OUT(i,j) += WEIGHT( 2,0)*IN(i+2,j);
+             #endif
+           #else 
+             #if LOOPGEN
+@@ -503,11 +545,15 @@
+       }
+     }
+ 
+-    /* add constant to solution to force refresh of neighbor data, if any        */
+-    for (j=0; j<n; j++) for (i=0; i<n; i++) IN(i,j)+= (DTYPE)1.0;
+-    /* feed the solution back into the input field, so the next sweep sees new data */
+-    for (j=RADIUS; j<n-RADIUS; j++) for (i=RADIUS; i<n-RADIUS; i++)
+-      IN(i,j) += FEEDBACK*OUT(i,j);
++    /* add constant to solution to force refresh of neighbor data, if any, fused with feedback */
++    #pragma omp parallel for private(j,i) schedule(static)
++    for (j=0; j<n; j++) {
++      #pragma omp simd
++      for (i=0; i<n; i++) {
++        IN(i,j) += (DTYPE)1.0;
++        if (i>=RADIUS && i<n-RADIUS && j>=RADIUS && j<n-RADIUS) IN(i,j) += FEEDBACK*OUT(i,j);
++      }
++    }
+ 
+   } /* end of iterations                                                         */
+ 
+@@ -515,12 +561,14 @@
+ 
+   /* compute normalized L1 solution norm on background grid                      */
+   norm = norm_in = (DTYPE) 0.0;
++  #pragma omp parallel for collapse(2) reduction(+:norm) private(j,i) schedule(static)
+   for (j=RADIUS; j<n-RADIUS; j++) for (i=RADIUS; i<n-RADIUS; i++) {
+     norm += (DTYPE)ABS(OUT(i,j));
+   }
+   norm /= f_active_points;
+ 
+   /* compute normalized L1 input field norm on background grid                   */
++  #pragma omp parallel for collapse(2) reduction(+:norm_in) private(j,i) schedule(static)
+   for (j=0; j<n; j++) for (i=0; i<n; i++) {
+     norm_in += (DTYPE)ABS(IN(i,j));
+   }
+@@ -529,12 +577,14 @@
+   for (g=0; g<4; g++) {
+     norm_r[g] = norm_in_r[g] = (DTYPE) 0.0;
+     /* compute normalized L1 solution norm on refinements                        */
++    #pragma omp parallel for collapse(2) reduction(+:norm_r[g]) private(j,i) schedule(static)
+     for (j=RADIUS; j<n_r_true-RADIUS; j++) for (i=RADIUS; i<n_r_true-RADIUS; i++) {
+       norm_r[g] += (DTYPE)ABS(OUT_R(g,i,j));
+     }
+     norm_r[g] /= f_active_points_r;
+ 
+     /* compute normalized L1 input field norms on refinements                    */
++    #pragma omp parallel for collapse(2) reduction(+:norm_in_r[g]) private(j,i) schedule(static)
+     for (j=0; j<n_r_true; j++) for (i=0; i<n_r_true; i++) {
+       norm_in_r[g] += (DTYPE)ABS(IN_R(g,i,j));
+     }
+diff -ruN original/build.sh final/build.sh
+--- original/build.sh	1969-12-31 19:00:00
++++ final/build.sh	2026-11-16 14:30:33
+@@ -0,0 +1,4 @@
++#!/bin/bash
++# Builds ./amr. Change this as you like; the grader runs it as `bash build.sh`.
++set -e
++${CC:-gcc} -O3 -fopenmp -march=x86-64-v3 -mtune=native -flto -std=gnu99 -DPRKVERSION='"2.17"' -DDOUBLE=1 -DRADIUS=2 -DSTAR=1 -DLOOPGEN=0 -DVERBOSE=0 -DRESTRICT_KEYWORD=1 -I. amr.c wtime.c -lm -o amr

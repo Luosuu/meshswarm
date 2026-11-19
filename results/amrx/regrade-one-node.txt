@@ -1,0 +1,12 @@
+udc-ba05-28c1
+Thread(s) per core:  1
+Core(s) per socket:  48
+Socket(s):           2
+Model name:          AMD EPYC 9454 48-Core Processor
+core set 1: [48, 49, 50, 51, 52, 63, 65, 94] (memory region [1])
+/scratch/fad3ew/meshswarm/runs/amrx-g1/gen-01/run-1 [no fast-math flags found] -> score 3.0 | speedup 7.90x on held-out sizes, median [min-max] of repeated runs (24.90s [24.54-25.53] -> 3.34s [3.33-3.38]; 16.19s [15.23-19.01] -> 1.93s [1.93-1.94])
+/scratch/fad3ew/meshswarm/runs/amrx-g1/gen-01/run-2 [no fast-math flags found] -> score 3.0 | speedup 6.66x on held-out sizes, median [min-max] of repeated runs (24.90s [24.54-25.53] -> 4.10s [4.08-4.23]; 16.19s [15.23-19.01] -> 2.21s [2.21-2.24])
+/scratch/fad3ew/meshswarm/runs/amrx-g2/gen-01/run-1 [no fast-math flags found] -> score 3.0 | speedup 6.59x on held-out sizes, median [min-max] of repeated runs (24.90s [24.54-25.53] -> 4.00s [3.96-4.03]; 16.19s [15.23-19.01] -> 2.32s [2.30-2.43])
+/scratch/fad3ew/meshswarm/runs/amrx-g2/gen-01/run-2 [no fast-math flags found] -> score 3.0 | speedup 7.92x on held-out sizes, median [min-max] of repeated runs (24.90s [24.54-25.53] -> 3.47s [3.46-3.49]; 16.19s [15.23-19.01] -> 1.85s [1.85-1.87])
+/scratch/fad3ew/meshswarm/runs/amrx-g3/gen-01/run-1 [no fast-math flags found] -> score 3.0 | speedup 7.81x on held-out sizes, median [min-max] of repeated runs (24.90s [24.54-25.53] -> 3.54s [3.52-3.59]; 16.19s [15.23-19.01] -> 1.87s [1.84-1.89])
+/scratch/fad3ew/meshswarm/runs/amrx-g3/gen-01/run-2 [no fast-math flags found] -> score 3.0 | speedup 7.91x on held-out sizes, median [min-max] of repeated runs (24.90s [24.54-25.53] -> 3.50s [3.48-3.54]; 16.19s [15.23-19.01] -> 1.84s [1.82-1.86])

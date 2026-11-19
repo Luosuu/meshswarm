@@ -1,0 +1,339 @@
+diff -ruN original/amr.c final/amr.c
+--- original/amr.c	2026-11-16 14:30:33
++++ final/amr.c	2026-11-16 14:30:33
+@@ -60,6 +60,7 @@
+ **********************************************************************************/
+ 
+ #include <par-res-kern_general.h>
++#include <omp.h>
+ 
+ #if DOUBLE
+   #define DTYPE   double
+@@ -91,11 +92,11 @@
+ void interpolate(DTYPE *ing_r, DTYPE *in, long n, long n_r_true, 
+                  long istart_r, long jstart_r, long expand,
+                  DTYPE h_r) {
+-  long ir, jr, ib, jrb, jrb1, jb, iend_r, jend_r;
+-  DTYPE xr, xb, yr, yb;
++  long ir, jr, iend_r, jend_r;
+ 
+   if (expand==1){
+     /* simply copy background grid values to refinement if same resolution      */
++    #pragma omp parallel for schedule(static)
+     for (jr=0; jr<n_r_true; jr++) for (ir=0; ir<n_r_true; ir++)
+       ING_R(ir,jr) = IN(ir+istart_r,jr+jstart_r);
+   } 
+@@ -103,23 +104,26 @@
+     iend_r = istart_r+(n_r_true-1)/expand;
+     jend_r = jstart_r+(n_r_true-1)/expand;
+     /* First, interpolate in x-direction                                        */
+-    for (jr=0,jb=jstart_r; jr<n_r_true; jr+=expand,jb++) {
++    #pragma omp parallel for schedule(static)
++    for (jr=0; jr<n_r_true; jr+=expand) {
++      long jb = jstart_r + jr/expand;
+       for (ir=0; ir<n_r_true-1; ir++) {
+-        xr = istart_r+h_r*(DTYPE)ir;
+-        ib = (long)xr;
+-        xb = (DTYPE)ib;
++        DTYPE xr = istart_r+h_r*(DTYPE)ir;
++        long ib = (long)xr;
++        DTYPE xb = (DTYPE)ib;
+         ING_R(ir,jr) = IN(ib+1,jb)*(xr-xb) + IN(ib,jb)*(xb+(DTYPE)1.0-xr);
+       }
+       ING_R(n_r_true-1,jr) = IN(iend_r,jb);
+     }
+ 
+     /* Next, interpolate in y-direction                                         */
++    #pragma omp parallel for schedule(static)
+     for (jr=0; jr<n_r_true-1; jr++) {
+-      yr = h_r*(DTYPE)jr;
+-      jb = (long)yr;
+-      jrb = jb*expand;
+-      jrb1 = (jb+1)*expand;
+-      yb = (DTYPE)jb;
++      DTYPE yr = h_r*(DTYPE)jr;
++      long jb = (long)yr;
++      long jrb = jb*expand;
++      long jrb1 = (jb+1)*expand;
++      DTYPE yb = (DTYPE)jb;
+       for (ir=0; ir<n_r_true; ir++) {
+         ING_R(ir,jr) = ING_R(ir,jrb1)*(yr-yb) + ING_R(ir,jrb)*(yb+(DTYPE)1.0-yr);
+       }
+@@ -356,8 +360,10 @@
+   printf("   Sub-iterations         = %d\n", sub_iterations);
+ 
+   /* intialize the input and output arrays                                     */
++  #pragma omp parallel for schedule(static)
+   for (j=0; j<n; j++) for (i=0; i<n; i++) 
+     IN(i,j)  = COEFX*i+COEFY*j+BUMP(i,j);
++  #pragma omp parallel for schedule(static)
+   for (j=RADIUS; j<n-RADIUS; j++) for (i=RADIUS; i<n-RADIUS; i++) 
+     OUT(i,j) = (DTYPE)0.0;
+ 
+@@ -368,12 +374,14 @@
+   jstart_r[1] = jstart_r[2] = n-n_r;
+ 
+   /* intialize the refinement arrays                                           */
+-  for (g=0; g<4; g++) {
++  #pragma omp parallel for schedule(static) collapse(2)
++  for (g=0; g<4; g++)
+     for (j=0; j<n_r_true; j++) for (i=0; i<n_r_true; i++) 
+       IN_R(g,i,j)  = (DTYPE)0.0;
++  #pragma omp parallel for schedule(static) collapse(2)
++  for (g=0; g<4; g++)
+     for (j=RADIUS; j<n_r_true-RADIUS; j++) for (i=RADIUS; i<n_r_true-RADIUS; i++) 
+       OUT_R(g,i,j) = (DTYPE)0.0;
+-  }
+   stencil_time = 0.0; /* silence compiler warning */
+ 
+   num_interpolations = 0;
+@@ -393,23 +401,40 @@
+     if ((iter%period) < duration) {
+       for (sub_iter=0; sub_iter<sub_iterations; sub_iter++) {
+         if (!tiling) {
++          #pragma omp parallel for schedule(static)
+           for (j=RADIUS; j<n_r_true-RADIUS; j++) {
+             for (i=RADIUS; i<n_r_true-RADIUS; i++) {
+               #if STAR
+                 #if LOOPGEN
+                   #include "loop_body_star_amr.incl"
+                 #else
+-                  for (jj=-RADIUS; jj<=RADIUS; jj++)  OUT_R(g,i,j) += WEIGHT_R(0,jj)*IN_R(g,i,j+jj);
+-                  for (ii=-RADIUS; ii<0; ii++)        OUT_R(g,i,j) += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
+-                  for (ii=1; ii<=RADIUS; ii++)        OUT_R(g,i,j) += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
++                  { DTYPE acc = OUT_R(g,i,j);
++                    #if RADIUS == 2
++                    acc += WEIGHT_R(0,-2)*IN_R(g,i,j-2);
++                    acc += WEIGHT_R(0,-1)*IN_R(g,i,j-1);
++                    acc += WEIGHT_R(0,0)*IN_R(g,i,j);
++                    acc += WEIGHT_R(0,1)*IN_R(g,i,j+1);
++                    acc += WEIGHT_R(0,2)*IN_R(g,i,j+2);
++                    acc += WEIGHT_R(-2,0)*IN_R(g,i-2,j);
++                    acc += WEIGHT_R(-1,0)*IN_R(g,i-1,j);
++                    acc += WEIGHT_R(1,0)*IN_R(g,i+1,j);
++                    acc += WEIGHT_R(2,0)*IN_R(g,i+2,j);
++                    #else
++                    for (jj=-RADIUS; jj<=RADIUS; jj++)  acc += WEIGHT_R(0,jj)*IN_R(g,i,j+jj);
++                    for (ii=-RADIUS; ii<0; ii++)        acc += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
++                    for (ii=1; ii<=RADIUS; ii++)        acc += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
++                    #endif
++                    OUT_R(g,i,j) = acc; }
+                 #endif
+               #else 
+                 #if LOOPGEN
+                   #include "loop_body_compact_amr.incl"
+                 #else
+                   /* would like to be able to un_roll this loop, but compiler will ignore  */
+-                  for (jj=-RADIUS; jj<=RADIUS; jj++) 
+-		    for (ii=-RADIUS; ii<=RADIUS; ii++)  OUT_R(g,i,j) += WEIGHT_R(ii,jj)*IN_R(g,i+ii,j+jj);
++                  { DTYPE acc = OUT_R(g,i,j);
++                    for (jj=-RADIUS; jj<=RADIUS; jj++) 
++                      for (ii=-RADIUS; ii<=RADIUS; ii++)  acc += WEIGHT_R(ii,jj)*IN_R(g,i+ii,j+jj);
++                    OUT_R(g,i,j) = acc; }
+                 #endif
+               #endif
+             }
+@@ -424,17 +449,33 @@
+                     #if LOOPGEN
+                       #include "loop_body_star_amr.incl"
+                     #else
+-                      for (jj=-RADIUS; jj<=RADIUS; jj++)  OUT_R(g,i,j) += WEIGHT_R(0,jj)*IN_R(g,i,j+jj);
+-                      for (ii=-RADIUS; ii<0; ii++)        OUT_R(g,i,j) += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
+-                      for (ii=1; ii<=RADIUS; ii++)        OUT_R(g,i,j) += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
++                      { DTYPE acc = OUT_R(g,i,j);
++                        #if RADIUS == 2
++                        acc += WEIGHT_R(0,-2)*IN_R(g,i,j-2);
++                        acc += WEIGHT_R(0,-1)*IN_R(g,i,j-1);
++                        acc += WEIGHT_R(0,0)*IN_R(g,i,j);
++                        acc += WEIGHT_R(0,1)*IN_R(g,i,j+1);
++                        acc += WEIGHT_R(0,2)*IN_R(g,i,j+2);
++                        acc += WEIGHT_R(-2,0)*IN_R(g,i-2,j);
++                        acc += WEIGHT_R(-1,0)*IN_R(g,i-1,j);
++                        acc += WEIGHT_R(1,0)*IN_R(g,i+1,j);
++                        acc += WEIGHT_R(2,0)*IN_R(g,i+2,j);
++                        #else
++                        for (jj=-RADIUS; jj<=RADIUS; jj++)  acc += WEIGHT_R(0,jj)*IN_R(g,i,j+jj);
++                        for (ii=-RADIUS; ii<0; ii++)        acc += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
++                        for (ii=1; ii<=RADIUS; ii++)        acc += WEIGHT_R(ii,0)*IN_R(g,i+ii,j);
++                        #endif
++                        OUT_R(g,i,j) = acc; }
+                     #endif
+                   #else 
+                     #if LOOPGEN
+                       #include "loop_body_compact_amr.incl"
+                     #else
+                       /* would like to be able to unroll this loop, but compiler will ignore  */
+-                      for (jj=-RADIUS; jj<=RADIUS; jj++) 
+-			for (ii=-RADIUS; ii<=RADIUS; ii++)  OUT_R(g,i,j) += WEIGHT_R(ii,jj)*IN_R(g,i+ii,j+jj);
++                      { DTYPE acc = OUT_R(g,i,j);
++                        for (jj=-RADIUS; jj<=RADIUS; jj++) 
++                          for (ii=-RADIUS; ii<=RADIUS; ii++)  acc += WEIGHT_R(ii,jj)*IN_R(g,i+ii,j+jj);
++                        OUT_R(g,i,j) = acc; }
+                     #endif
+                   #endif
+                 }
+@@ -443,33 +484,58 @@
+           }
+         }
+         /* add constant to solution to force refresh of neighbor data, if any        */
+-        for (j=0; j<n_r_true; j++) for (i=0; i<n_r_true; i++) IN_R(g,i,j)+= (DTYPE)1.0;
+         /* feed the solution back into the input field, so the next sweep sees new data */
+-        for (j=RADIUS; j<n_r_true-RADIUS; j++) for (i=RADIUS; i<n_r_true-RADIUS; i++)
+-          IN_R(g,i,j) += FEEDBACK*OUT_R(g,i,j);
++        #pragma omp parallel for schedule(static)
++        for (j=0; j<n_r_true; j++) {
++          if (j>=RADIUS && j<n_r_true-RADIUS) {
++            for (i=0; i<RADIUS; i++) IN_R(g,i,j) += (DTYPE)1.0;
++            #pragma omp simd
++            for (i=RADIUS; i<n_r_true-RADIUS; i++) IN_R(g,i,j) = (IN_R(g,i,j) + (DTYPE)1.0) + FEEDBACK*OUT_R(g,i,j);
++            for (i=n_r_true-RADIUS; i<n_r_true; i++) IN_R(g,i,j) += (DTYPE)1.0;
++          } else {
++            for (i=0; i<n_r_true; i++) IN_R(g,i,j) += (DTYPE)1.0;
++          }
++        }
+       }
+     }
+ 
+     /* Apply the stencil operator to background grid                           */
+ 
+     if (!tiling) {
++      #pragma omp parallel for schedule(static)
+       for (j=RADIUS; j<n-RADIUS; j++) {
+         for (i=RADIUS; i<n-RADIUS; i++) {
+           #if STAR
+             #if LOOPGEN
+               #include "loop_body_star.incl"
+             #else
+-              for (jj=-RADIUS; jj<=RADIUS; jj++)  OUT(i,j) += WEIGHT(0,jj)*IN(i,j+jj);
+-              for (ii=-RADIUS; ii<0; ii++)        OUT(i,j) += WEIGHT(ii,0)*IN(i+ii,j);
+-              for (ii=1; ii<=RADIUS; ii++)        OUT(i,j) += WEIGHT(ii,0)*IN(i+ii,j);
++              { DTYPE acc = OUT(i,j);
++                #if RADIUS == 2
++                acc += WEIGHT(0,-2)*IN(i,j-2);
++                acc += WEIGHT(0,-1)*IN(i,j-1);
++                acc += WEIGHT(0,0)*IN(i,j);
++                acc += WEIGHT(0,1)*IN(i,j+1);
++                acc += WEIGHT(0,2)*IN(i,j+2);
++                acc += WEIGHT(-2,0)*IN(i-2,j);
++                acc += WEIGHT(-1,0)*IN(i-1,j);
++                acc += WEIGHT(1,0)*IN(i+1,j);
++                acc += WEIGHT(2,0)*IN(i+2,j);
++                #else
++                for (jj=-RADIUS; jj<=RADIUS; jj++)  acc += WEIGHT(0,jj)*IN(i,j+jj);
++                for (ii=-RADIUS; ii<0; ii++)        acc += WEIGHT(ii,0)*IN(i+ii,j);
++                for (ii=1; ii<=RADIUS; ii++)        acc += WEIGHT(ii,0)*IN(i+ii,j);
++                #endif
++                OUT(i,j) = acc; }
+             #endif
+           #else 
+             #if LOOPGEN
+               #include "loop_body_compact.incl"
+             #else
+               /* would like to be able to unroll this loop, but compiler will ignore  */
+-              for (jj=-RADIUS; jj<=RADIUS; jj++) 
+-              for (ii=-RADIUS; ii<=RADIUS; ii++)  OUT(i,j) += WEIGHT(ii,jj)*IN(i+ii,j+jj);
++              { DTYPE acc = OUT(i,j);
++                for (jj=-RADIUS; jj<=RADIUS; jj++) 
++                for (ii=-RADIUS; ii<=RADIUS; ii++)  acc += WEIGHT(ii,jj)*IN(i+ii,j+jj);
++                OUT(i,j) = acc; }
+             #endif
+           #endif
+         }
+@@ -484,17 +550,33 @@
+                 #if LOOPGEN
+                   #include "loop_body_star.incl"
+                 #else
+-                  for (jj=-RADIUS; jj<=RADIUS; jj++)  OUT(i,j) += WEIGHT(0,jj)*IN(i,j+jj);
+-                  for (ii=-RADIUS; ii<0; ii++)        OUT(i,j) += WEIGHT(ii,0)*IN(i+ii,j);
+-                  for (ii=1; ii<=RADIUS; ii++)        OUT(i,j) += WEIGHT(ii,0)*IN(i+ii,j);
++                  { DTYPE acc = OUT(i,j);
++                    #if RADIUS == 2
++                    acc += WEIGHT(0,-2)*IN(i,j-2);
++                    acc += WEIGHT(0,-1)*IN(i,j-1);
++                    acc += WEIGHT(0,0)*IN(i,j);
++                    acc += WEIGHT(0,1)*IN(i,j+1);
++                    acc += WEIGHT(0,2)*IN(i,j+2);
++                    acc += WEIGHT(-2,0)*IN(i-2,j);
++                    acc += WEIGHT(-1,0)*IN(i-1,j);
++                    acc += WEIGHT(1,0)*IN(i+1,j);
++                    acc += WEIGHT(2,0)*IN(i+2,j);
++                    #else
++                    for (jj=-RADIUS; jj<=RADIUS; jj++)  acc += WEIGHT(0,jj)*IN(i,j+jj);
++                    for (ii=-RADIUS; ii<0; ii++)        acc += WEIGHT(ii,0)*IN(i+ii,j);
++                    for (ii=1; ii<=RADIUS; ii++)        acc += WEIGHT(ii,0)*IN(i+ii,j);
++                    #endif
++                    OUT(i,j) = acc; }
+                 #endif
+               #else 
+                 #if LOOPGEN
+                   #include "loop_body_compact.incl"
+                 #else
+                   /* would like to be able to unroll this loop, but compiler will ignore  */
+-                  for (jj=-RADIUS; jj<=RADIUS; jj++) 
+-                  for (ii=-RADIUS; ii<=RADIUS; ii++)  OUT(i,j) += WEIGHT(ii,jj)*IN(i+ii,j+jj);
++                  { DTYPE acc = OUT(i,j);
++                    for (jj=-RADIUS; jj<=RADIUS; jj++) 
++                    for (ii=-RADIUS; ii<=RADIUS; ii++)  acc += WEIGHT(ii,jj)*IN(i+ii,j+jj);
++                    OUT(i,j) = acc; }
+                 #endif
+               #endif
+             }
+@@ -504,10 +586,18 @@
+     }
+ 
+     /* add constant to solution to force refresh of neighbor data, if any        */
+-    for (j=0; j<n; j++) for (i=0; i<n; i++) IN(i,j)+= (DTYPE)1.0;
+     /* feed the solution back into the input field, so the next sweep sees new data */
+-    for (j=RADIUS; j<n-RADIUS; j++) for (i=RADIUS; i<n-RADIUS; i++)
+-      IN(i,j) += FEEDBACK*OUT(i,j);
++    #pragma omp parallel for schedule(static)
++    for (j=0; j<n; j++) {
++      if (j>=RADIUS && j<n-RADIUS) {
++        for (i=0; i<RADIUS; i++) IN(i,j) += (DTYPE)1.0;
++        #pragma omp simd
++        for (i=RADIUS; i<n-RADIUS; i++) IN(i,j) = (IN(i,j) + (DTYPE)1.0) + FEEDBACK*OUT(i,j);
++        for (i=n-RADIUS; i<n; i++) IN(i,j) += (DTYPE)1.0;
++      } else {
++        for (i=0; i<n; i++) IN(i,j) += (DTYPE)1.0;
++      }
++    }
+ 
+   } /* end of iterations                                                         */
+ 
+@@ -515,12 +605,14 @@
+ 
+   /* compute normalized L1 solution norm on background grid                      */
+   norm = norm_in = (DTYPE) 0.0;
++  #pragma omp parallel for schedule(static) reduction(+:norm)
+   for (j=RADIUS; j<n-RADIUS; j++) for (i=RADIUS; i<n-RADIUS; i++) {
+     norm += (DTYPE)ABS(OUT(i,j));
+   }
+   norm /= f_active_points;
+ 
+   /* compute normalized L1 input field norm on background grid                   */
++  #pragma omp parallel for schedule(static) reduction(+:norm_in)
+   for (j=0; j<n; j++) for (i=0; i<n; i++) {
+     norm_in += (DTYPE)ABS(IN(i,j));
+   }
+@@ -529,12 +621,14 @@
+   for (g=0; g<4; g++) {
+     norm_r[g] = norm_in_r[g] = (DTYPE) 0.0;
+     /* compute normalized L1 solution norm on refinements                        */
++    #pragma omp parallel for schedule(static) reduction(+:norm_r[g])
+     for (j=RADIUS; j<n_r_true-RADIUS; j++) for (i=RADIUS; i<n_r_true-RADIUS; i++) {
+       norm_r[g] += (DTYPE)ABS(OUT_R(g,i,j));
+     }
+     norm_r[g] /= f_active_points_r;
+ 
+     /* compute normalized L1 input field norms on refinements                    */
++    #pragma omp parallel for schedule(static) reduction(+:norm_in_r[g])
+     for (j=0; j<n_r_true; j++) for (i=0; i<n_r_true; i++) {
+       norm_in_r[g] += (DTYPE)ABS(IN_R(g,i,j));
+     }
+diff -ruN original/build.sh final/build.sh
+--- original/build.sh	1969-12-31 19:00:00
++++ final/build.sh	2026-11-16 14:30:33
+@@ -0,0 +1,3 @@
++#!/bin/bash
++set -e
++${CC:-gcc} -O3 -fopenmp -march=x86-64-v3 -std=gnu99 -DPRKVERSION='"2.17"' -DDOUBLE=1 -DRADIUS=2 -DSTAR=1 -DLOOPGEN=0 -DVERBOSE=0 -DRESTRICT_KEYWORD=1 -I. amr.c wtime.c -lm -o amr

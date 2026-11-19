@@ -1,0 +1,829 @@
+diff -ruN original/CoMD.c final/CoMD.c
+--- original/CoMD.c	2026-11-16 14:30:34
++++ final/CoMD.c	2026-11-16 14:30:34
+@@ -274,6 +274,7 @@
+    strcpy(species->name, pot->name);
+    species->atomicNo = pot->atomicNo;
+    species->mass = pot->mass;
++   species->massInv = 1.0 / pot->mass;
+ 
+    return species;
+ }
+diff -ruN original/CoMDTypes.h final/CoMDTypes.h
+--- original/CoMDTypes.h	2026-11-16 14:30:34
++++ final/CoMDTypes.h	2026-11-16 14:30:34
+@@ -45,6 +45,7 @@
+    char  name[3];   //!< element name
+    int	 atomicNo;  //!< atomic number  
+    real_t mass;     //!< mass in internal units
++   real_t massInv;  //!< 1/mass in internal units
+ } SpeciesData;
+ 
+ /// Simple struct to store the initial energy and number of atoms. 
+diff -ruN original/build.sh final/build.sh
+--- original/build.sh	2026-11-16 14:30:34
++++ final/build.sh	2026-11-16 14:30:34
+@@ -1,4 +1,4 @@
+ #!/bin/bash
+ # Builds ./CoMD. Change this as you like; the grader runs it as `bash build.sh`.
+ set -e
+-${CC:-gcc} -std=c99 -O2 -fopenmp -DDOUBLE -I. *.c -lm -o CoMD
++${CC:-gcc} -std=c99 -O3 -march=native -fno-math-errno -DNDEBUG -ffp-contract=fast -funroll-loops -flto -fopenmp -DDOUBLE -I. *.c -lm -o CoMD
+diff -ruN original/eam.c final/eam.c
+--- original/eam.c	2026-11-16 14:30:34
++++ final/eam.c	2026-11-16 14:30:34
+@@ -151,7 +151,7 @@
+ static InterpolationObject* initInterpolationObject(
+    int n, real_t x0, real_t dx, real_t* data);
+ static void destroyInterpolationObject(InterpolationObject** table);
+-static void interpolate(InterpolationObject* table, real_t r, real_t* f, real_t* df);
++static inline void interpolate(InterpolationObject* table, real_t r, real_t* f, real_t* df);
+ static void bcastInterpolationObject(InterpolationObject** table);
+ static void printTableData(InterpolationObject* table, const char* fileName);
+ 
+@@ -233,72 +233,151 @@
+    real_t rCut2 = pot->cutoff*pot->cutoff;
+    real_t etot = 0.;
+ 
+-   // zero forces / energy / rho /rhoprime
+-   int fsize = s->boxes->nTotalBoxes*MAXATOMS;
++   int nNbrBoxes = 27;
++
++   // zero rhobar (forces are accumulated unconditionally now)
+    #pragma omp parallel for
+-   for (int ii=0; ii<fsize; ii++)
++   for (int iBox=0; iBox<s->boxes->nLocalBoxes; iBox++)
+    {
+-      zeroReal3(s->atoms->f[ii]);
+-      s->atoms->U[ii] = 0.;
+-      pot->dfEmbed[ii] = 0.;
+-      pot->rhobar[ii] = 0.;
++      int iOff = iBox*MAXATOMS;
++      int iEnd = iOff + s->boxes->nAtoms[iBox];
++      for (int ii=iOff; ii<iEnd; ii++)
++      {
++         zeroReal3(s->atoms->f[ii]);
++         pot->rhobar[ii] = 0.;
++      }
+    }
+ 
+-   int nNbrBoxes = 27;
+-   // loop over local boxes
+-   #pragma omp parallel for reduction(+:etot)
+-   for (int iBox=0; iBox<s->boxes->nLocalBoxes; iBox++)
++   // Third-law halving pass 1: process each unordered pair once. Local j
++   // mirror contributions (f, rhobar) are accumulated into per-thread
++   // shadow buffers; the halo side is a no-op (shadow writes skipped).
++   const int nLocal = s->boxes->nLocalBoxes;
++   const int nThreads = omp_get_max_threads();
++   static real3* shadowF = NULL;
++   static real_t* shadowRho = NULL;
++   static size_t shadowCap = 0;
++   size_t need = (size_t)nThreads*nLocal*MAXATOMS;
++   if (shadowCap < need)
+    {
+-      int nIBox = s->boxes->nAtoms[iBox];
++      real3* nf = (real3*) realloc(shadowF, need*sizeof(real3));
++      real_t* nr = (real_t*) realloc(shadowRho, need*sizeof(real_t));
++      if (!nf || !nr) { fprintf(stderr, "shadow realloc failed\n"); return 1; }
++      shadowF = nf; shadowRho = nr; shadowCap = need;
++   }
+ 
+-      // loop over neighbor boxes of iBox (some may be halo boxes)
+-      for (int jTmp=0; jTmp<nNbrBoxes; jTmp++)
++   #pragma omp parallel reduction(+:etot)
++   {
++      const int tid = omp_get_thread_num();
++      real3* myShadowF = shadowF + (size_t)tid*nLocal*MAXATOMS;
++      real_t* myShadowRho = shadowRho + (size_t)tid*nLocal*MAXATOMS;
++      for (int iBox=0; iBox<nLocal; iBox++)
+       {
+-         int jBox = s->boxes->nbrBoxes[iBox][jTmp];
+-         int nJBox = s->boxes->nAtoms[jBox];
++         int iOff = iBox*MAXATOMS;
++         int iEnd = iOff + s->boxes->nAtoms[iBox];
++         for (int ii=iOff; ii<iEnd; ii++)
++         {
++            zeroReal3(myShadowF[ii]);
++            myShadowRho[ii] = 0.0;
++         }
++      }
+ 
+-         // loop over atoms in iBox
+-         for (int iOff=MAXATOMS*iBox; iOff<(iBox*MAXATOMS+nIBox); iOff++)
++      #pragma omp for schedule(static)
++      for (int iBox=0; iBox<nLocal; iBox++)
++      {
++         int nIBox = s->boxes->nAtoms[iBox];
++
++         // loop over neighbor boxes of iBox (some may be halo boxes)
++         for (int jTmp=0; jTmp<nNbrBoxes; jTmp++)
+          {
+-            // loop over atoms in jBox
+-            for (int jOff=MAXATOMS*jBox; jOff<(jBox*MAXATOMS+nJBox); jOff++)
+-            {
++            int jBox = s->boxes->nbrBoxes[iBox][jTmp];
++            if (jBox < iBox && jBox < nLocal) continue;
++            int nJBox = s->boxes->nAtoms[jBox];
++            const int jLocal = (jBox < nLocal);
++            const int sameBox = (jBox == iBox);
+ 
+-               real3 dr;
+-               real_t r2 = 0.0;
+-               for (int k=0; k<3; k++)
++            // loop over atoms in iBox
++            for (int iOff=MAXATOMS*iBox; iOff<(iBox*MAXATOMS+nIBox); iOff++)
++            {
++               const real_t* ri = s->atoms->r[iOff];
++               int jStart = MAXATOMS*jBox;
++               int jEnd = jStart + nJBox;
++               if (sameBox)
+                {
+-                  dr[k]=s->atoms->r[iOff][k]-s->atoms->r[jOff][k];
+-                  r2+=dr[k]*dr[k];
++                  jStart = iOff+1;
++                  if (jStart >= jEnd) continue;
+                }
+-
+-               if(r2 <= rCut2 && r2 > 0.0)
++               // loop over atoms in jBox
++               for (int jOff=jStart; jOff<jEnd; jOff++)
+                {
+ 
+-                  real_t r = sqrt(r2);
+-
+-                  real_t phiTmp, dPhi, rhoTmp, dRho;
+-                  interpolate(pot->phi, r, &phiTmp, &dPhi);
+-                  interpolate(pot->rho, r, &rhoTmp, &dRho);
+-
+-                  for (int k=0; k<3; k++)
++                  real_t dx, dy, dz, r2;
+                   {
+-                     s->atoms->f[iOff][k] -= dPhi*dr[k]/r;
++                     const real_t* rj = s->atoms->r[jOff];
++                     dx = ri[0]-rj[0];
++                     dy = ri[1]-rj[1];
++                     dz = ri[2]-rj[2];
+                   }
++                  r2 = dx*dx + dy*dy + dz*dz;
+ 
+-                  // Calculate energy contribution
+-                  s->atoms->U[iOff] += 0.5*phiTmp;
+-                  etot += 0.5*phiTmp;
++                  if(r2 <= rCut2 && r2 > 0.0)
++                  {
+ 
+-                  // accumulate rhobar for each atom
+-                  pot->rhobar[iOff] += rhoTmp;
+-               }
++                     real_t r = sqrt(r2);
+ 
+-            } // loop over atoms in jBox
+-         } // loop over atoms in iBox
+-      } // loop over neighbor boxes
+-   } // loop over local boxes
++                     real_t phiTmp, dPhi, rhoTmp, dRho;
++                     interpolate(pot->phi, r, &phiTmp, &dPhi);
++                     interpolate(pot->rho, r, &rhoTmp, &dRho);
+ 
++                     real_t invR = 1.0/r;
++                     s->atoms->f[iOff][0] -= dPhi*dx*invR;
++                     s->atoms->f[iOff][1] -= dPhi*dy*invR;
++                     s->atoms->f[iOff][2] -= dPhi*dz*invR;
++
++                     // Calculate energy contribution
++                     etot += jLocal ? phiTmp : 0.5*phiTmp;
++
++                     // accumulate rhobar for each atom
++                     pot->rhobar[iOff] += rhoTmp;
++
++                     // mirror contributions for the local j-side atom
++                     if (jLocal)
++                     {
++                        real3* fj = &myShadowF[jOff];
++                        (*fj)[0] += dPhi*dx*invR;
++                        (*fj)[1] += dPhi*dy*invR;
++                        (*fj)[2] += dPhi*dz*invR;
++                        myShadowRho[jOff] += rhoTmp;
++                     }
++                  }
++
++               } // loop over atoms in jBox
++            } // loop over atoms in iBox
++         } // loop over neighbor boxes
++      } // loop over local boxes
++   } // end pass 1
++
++   // merge pass-1 shadows into f and rhobar
++   #pragma omp parallel for
++   for (int iBox=0; iBox<nLocal; iBox++)
++   {
++      int iOff = iBox*MAXATOMS;
++      int iEnd = iOff + s->boxes->nAtoms[iBox];
++      for (int ii=iOff; ii<iEnd; ii++)
++      {
++         real_t fx=0.0, fy=0.0, fz=0.0, rho=0.0;
++         for (int t=0; t<nThreads; ++t)
++         {
++            const real3* fj = &shadowF[(size_t)t*nLocal*MAXATOMS + ii];
++            fx += (*fj)[0]; fy += (*fj)[1]; fz += (*fj)[2];
++            rho += shadowRho[(size_t)t*nLocal*MAXATOMS + ii];
++         }
++         s->atoms->f[ii][0] += fx;
++         s->atoms->f[ii][1] += fy;
++         s->atoms->f[ii][2] += fz;
++         pot->rhobar[ii] += rho;
++      }
++   }
++
+    // Compute Embedding Energy
+    // loop over all local boxes
+    #pragma omp parallel for reduction(+:etot)
+@@ -312,7 +391,6 @@
+          real_t fEmbed, dfEmbed;
+          interpolate(pot->f, pot->rhobar[iOff], &fEmbed, &dfEmbed);
+          pot->dfEmbed[iOff] = dfEmbed; // save derivative for halo exchange
+-         s->atoms->U[iOff] += fEmbed;
+          etot += fEmbed;
+       }
+    }
+@@ -322,53 +400,105 @@
+    haloExchange(pot->forceExchange, pot->forceExchangeData);
+    stopTimer(eamHaloTimer);
+ 
+-   // third pass
+-   // loop over local boxes
+-   #pragma omp parallel for
+-   for (int iBox=0; iBox<s->boxes->nLocalBoxes; iBox++)
++   // third pass (third-law halving): visit each unordered pair once;
++   // mirror force on local j-side atoms goes into per-thread shadows.
++   #pragma omp parallel
+    {
+-      int nIBox = s->boxes->nAtoms[iBox];
++      const int tid = omp_get_thread_num();
++      real3* myShadowF = shadowF + (size_t)tid*nLocal*MAXATOMS;
++      for (int iBox=0; iBox<nLocal; iBox++)
++      {
++         int iOff = iBox*MAXATOMS;
++         int iEnd = iOff + s->boxes->nAtoms[iBox];
++         for (int ii=iOff; ii<iEnd; ii++)
++            zeroReal3(myShadowF[ii]);
++      }
+ 
+-      // loop over neighbor boxes of iBox (some may be halo boxes)
+-      for (int jTmp=0; jTmp<nNbrBoxes; jTmp++)
++      #pragma omp for schedule(static)
++      for (int iBox=0; iBox<nLocal; iBox++)
+       {
+-         int jBox = s->boxes->nbrBoxes[iBox][jTmp];
+-         int nJBox = s->boxes->nAtoms[jBox];
++         int nIBox = s->boxes->nAtoms[iBox];
+ 
+-         // loop over atoms in iBox
+-         for (int iOff=MAXATOMS*iBox; iOff<(MAXATOMS*iBox+nIBox); iOff++)
++         // loop over neighbor boxes of iBox (some may be halo boxes)
++         for (int jTmp=0; jTmp<nNbrBoxes; jTmp++)
+          {
+-            // loop over atoms in jBox
+-            for (int jOff=MAXATOMS*jBox; jOff<(MAXATOMS*jBox+nJBox); jOff++)
+-            { 
++            int jBox = s->boxes->nbrBoxes[iBox][jTmp];
++            if (jBox < iBox && jBox < nLocal) continue;
++            int nJBox = s->boxes->nAtoms[jBox];
++            const int jLocal = (jBox < nLocal);
++            const int sameBox = (jBox == iBox);
+ 
+-               real_t r2 = 0.0;
+-               real3 dr;
+-               for (int k=0; k<3; k++)
++            // loop over atoms in iBox
++            for (int iOff=MAXATOMS*iBox; iOff<(MAXATOMS*iBox+nIBox); iOff++)
++            {
++               const real_t* ri = s->atoms->r[iOff];
++               const real_t dfI = pot->dfEmbed[iOff];
++               int jStart = MAXATOMS*jBox;
++               int jEnd = jStart + nJBox;
++               if (sameBox)
+                {
+-                  dr[k]=s->atoms->r[iOff][k]-s->atoms->r[jOff][k];
+-                  r2+=dr[k]*dr[k];
++                  jStart = iOff+1;
++                  if (jStart >= jEnd) continue;
+                }
+-
+-               if(r2 <= rCut2 && r2 > 0.0)
++               // loop over atoms in jBox
++               for (int jOff=jStart; jOff<jEnd; jOff++)
+                {
++                  const real_t* rj = s->atoms->r[jOff];
++                  const real_t dx = ri[0]-rj[0];
++                  const real_t dy = ri[1]-rj[1];
++                  const real_t dz = ri[2]-rj[2];
++                  const real_t r2 = dx*dx + dy*dy + dz*dz;
+ 
+-                  real_t r = sqrt(r2);
++                  if(r2 <= rCut2 && r2 > 0.0)
++                  {
+ 
+-                  real_t rhoTmp, dRho;
+-                  interpolate(pot->rho, r, &rhoTmp, &dRho);
++                     real_t r = sqrt(r2);
+ 
+-                  for (int k=0; k<3; k++)
+-                  {
+-                     s->atoms->f[iOff][k] -= (pot->dfEmbed[iOff]+pot->dfEmbed[jOff])*dRho*dr[k]/r;
++                     real_t rhoTmp, dRho;
++                     interpolate(pot->rho, r, &rhoTmp, &dRho);
++
++                     real_t invR = 1.0/r;
++                     real_t coeff = (dfI+pot->dfEmbed[jOff])*dRho*invR;
++                     s->atoms->f[iOff][0] -= coeff*dx;
++                     s->atoms->f[iOff][1] -= coeff*dy;
++                     s->atoms->f[iOff][2] -= coeff*dz;
++
++                     // mirror force on the j-side atom (local only)
++                     if (jLocal)
++                     {
++                        real3* fj = &myShadowF[jOff];
++                        (*fj)[0] += coeff*dx;
++                        (*fj)[1] += coeff*dy;
++                        (*fj)[2] += coeff*dz;
++                     }
+                   }
+-               }
+ 
+-            } // loop over atoms in jBox
+-         } // loop over atoms in iBox
+-      } // loop over neighbor boxes
+-   } // loop over local boxes
++               } // loop over atoms in jBox
++            } // loop over atoms in iBox
++         } // loop over neighbor boxes
++      } // loop over local boxes
++   } // end pass 3
+ 
++   // merge pass-3 shadows
++   #pragma omp parallel for
++   for (int iBox=0; iBox<nLocal; iBox++)
++   {
++      int iOff = iBox*MAXATOMS;
++      int iEnd = iOff + s->boxes->nAtoms[iBox];
++      for (int ii=iOff; ii<iEnd; ii++)
++      {
++         real_t fx=0.0, fy=0.0, fz=0.0;
++         for (int t=0; t<nThreads; ++t)
++         {
++            const real3* fj = &shadowF[(size_t)t*nLocal*MAXATOMS + ii];
++            fx += (*fj)[0]; fy += (*fj)[1]; fz += (*fj)[2];
++         }
++         s->atoms->f[ii][0] += fx;
++         s->atoms->f[ii][1] += fy;
++         s->atoms->f[ii][2] += fz;
++      }
++   }
++
+    s->ePotential = (real_t) etot;
+ 
+    return 0;
+@@ -509,7 +639,7 @@
+ /// \param [in] r Point where function value is needed.
+ /// \param [out] f The interpolated value of f(r).
+ /// \param [out] df The interpolated value of df(r)/dr.
+-void interpolate(InterpolationObject* table, real_t r, real_t* f, real_t* df)
++static inline void interpolate(InterpolationObject* table, real_t r, real_t* f, real_t* df)
+ {
+    const real_t* tt = table->values; // alias
+    
+@@ -517,13 +647,13 @@
+ 
+    r = (r-table->x0)*(table->invDx) ;
+    int ii = (int)floor(r);
+-   if (ii > table->n)
++   if (__builtin_expect(ii > table->n, 0))
+    {
+       ii = table->n;
+-      r = table->n / table->invDx;
++      r = (real_t)table->n;
+    }
+    // reset r to fractional distance
+-   r = r - floor(r);
++   r = r - (real_t)ii;
+ 
+    real_t g1 = tt[ii+1] - tt[ii-1];
+    real_t g2 = tt[ii+2] - tt[ii];
+diff -ruN original/haloExchange.c final/haloExchange.c
+--- original/haloExchange.c	2026-11-16 14:30:34
++++ final/haloExchange.c	2026-11-16 14:30:34
+@@ -275,15 +275,35 @@
+ /// \param [in] iAxis     Axis index.
+ /// \param [in, out] data Pointer to data that will be passed to the load and
+ ///                       unload functions
++// Persistent scratch buffers for halo exchanges (grow-only, reused every call).
++// Single-threaded use; sized to the largest bufCapacity seen so far.
++static char* scratchSendM = NULL;
++static char* scratchSendP = NULL;
++static char* scratchRecvM = NULL;
++static char* scratchRecvP = NULL;
++static int   scratchCapacity = 0;
++
+ void exchangeData(HaloExchange* haloExchange, void* data, int iAxis)
+ {
+    enum HaloFaceOrder faceM = 2*iAxis;
+    enum HaloFaceOrder faceP = faceM+1;
+ 
+-   char* sendBufM = comdMalloc(haloExchange->bufCapacity);
+-   char* sendBufP = comdMalloc(haloExchange->bufCapacity);
+-   char* recvBufM = comdMalloc(haloExchange->bufCapacity);
+-   char* recvBufP = comdMalloc(haloExchange->bufCapacity);
++   if (scratchCapacity < haloExchange->bufCapacity)
++   {
++      comdFree(scratchSendM);
++      comdFree(scratchSendP);
++      comdFree(scratchRecvM);
++      comdFree(scratchRecvP);
++      scratchSendM = comdMalloc(haloExchange->bufCapacity);
++      scratchSendP = comdMalloc(haloExchange->bufCapacity);
++      scratchRecvM = comdMalloc(haloExchange->bufCapacity);
++      scratchRecvP = comdMalloc(haloExchange->bufCapacity);
++      scratchCapacity = haloExchange->bufCapacity;
++   }
++   char* sendBufM = scratchSendM;
++   char* sendBufP = scratchSendP;
++   char* recvBufM = scratchRecvM;
++   char* recvBufP = scratchRecvP;
+ 
+    int nSendM = haloExchange->loadBuffer(haloExchange->parms, data, faceM, sendBufM);
+    int nSendP = haloExchange->loadBuffer(haloExchange->parms, data, faceP, sendBufP);
+@@ -300,10 +320,6 @@
+    
+    haloExchange->unloadBuffer(haloExchange->parms, data, faceM, nRecvM, recvBufM);
+    haloExchange->unloadBuffer(haloExchange->parms, data, faceP, nRecvP, recvBufP);
+-   comdFree(recvBufP);
+-   comdFree(recvBufM);
+-   comdFree(sendBufP);
+-   comdFree(sendBufM);
+ }
+ 
+ /// Make a list of link cells that need to be sent across the specified
+@@ -613,35 +629,43 @@
+ void sortAtomsInCell(Atoms* atoms, LinkCell* boxes, int iBox)
+ {
+    int nAtoms = boxes->nAtoms[iBox];
++   if (nAtoms < 2) return;
+ 
+-   AtomMsg tmp[nAtoms];
+-
+    int begin = iBox*MAXATOMS;
+-   int end = begin + nAtoms;
+-   for (int ii=begin, iTmp=0; ii<end; ++ii, ++iTmp)
++   // Early-out if the cell is already sorted by gid (common case: atoms rarely change cells).
++   int sorted = 1;
++   for (int ii=begin+1; ii<begin+nAtoms; ++ii)
+    {
+-      tmp[iTmp].gid  = atoms->gid[ii];
+-      tmp[iTmp].type = atoms->iSpecies[ii];
+-      tmp[iTmp].rx =   atoms->r[ii][0];
+-      tmp[iTmp].ry =   atoms->r[ii][1];
+-      tmp[iTmp].rz =   atoms->r[ii][2];
+-      tmp[iTmp].px =   atoms->p[ii][0];
+-      tmp[iTmp].py =   atoms->p[ii][1];
+-      tmp[iTmp].pz =   atoms->p[ii][2];
++      if (atoms->gid[ii] < atoms->gid[ii-1]) { sorted = 0; break; }
+    }
+-   qsort(&tmp, nAtoms, sizeof(AtomMsg), sortAtomsById);
+-   for (int ii=begin, iTmp=0; ii<end; ++ii, ++iTmp)
++   if (sorted) return;
++   // Insertion sort directly on the atom arrays, keyed on gid.
++   // nAtoms is typically tiny (a handful per link cell).
++   for (int ii=1; ii<nAtoms; ++ii)
+    {
+-      atoms->gid[ii]   = tmp[iTmp].gid;
+-      atoms->iSpecies[ii] = tmp[iTmp].type;
+-      atoms->r[ii][0]  = tmp[iTmp].rx;
+-      atoms->r[ii][1]  = tmp[iTmp].ry;
+-      atoms->r[ii][2]  = tmp[iTmp].rz;
+-      atoms->p[ii][0]  = tmp[iTmp].px;
+-      atoms->p[ii][1]  = tmp[iTmp].py;
+-      atoms->p[ii][2]  = tmp[iTmp].pz;
++      int gid = atoms->gid[begin+ii];
++      int type = atoms->iSpecies[begin+ii];
++      real_t rx = atoms->r[begin+ii][0], ry = atoms->r[begin+ii][1], rz = atoms->r[begin+ii][2];
++      real_t px = atoms->p[begin+ii][0], py = atoms->p[begin+ii][1], pz = atoms->p[begin+ii][2];
++      int jj = ii-1;
++      while (jj >= 0 && atoms->gid[begin+jj] > gid)
++      {
++         int jjj = jj+1;
++         atoms->gid[begin+jjj] = atoms->gid[begin+jj];
++         atoms->iSpecies[begin+jjj] = atoms->iSpecies[begin+jj];
++         atoms->r[begin+jjj][0] = atoms->r[begin+jj][0];
++         atoms->r[begin+jjj][1] = atoms->r[begin+jj][1];
++         atoms->r[begin+jjj][2] = atoms->r[begin+jj][2];
++         atoms->p[begin+jjj][0] = atoms->p[begin+jj][0];
++         atoms->p[begin+jjj][1] = atoms->p[begin+jj][1];
++         atoms->p[begin+jjj][2] = atoms->p[begin+jj][2];
++         --jj;
++      }
++      atoms->gid[begin+jj+1] = gid;
++      atoms->iSpecies[begin+jj+1] = type;
++      atoms->r[begin+jj+1][0] = rx; atoms->r[begin+jj+1][1] = ry; atoms->r[begin+jj+1][2] = rz;
++      atoms->p[begin+jj+1][0] = px; atoms->p[begin+jj+1][1] = py; atoms->p[begin+jj+1][2] = pz;
+    }
+-   
+ }
+ 
+ ///  A function suitable for passing to qsort to sort atoms by gid.
+diff -ruN original/initAtoms.c final/initAtoms.c
+--- original/initAtoms.c	2026-11-16 14:30:34
++++ final/initAtoms.c	2026-11-16 14:30:34
+@@ -31,7 +31,6 @@
+    atoms->r =        (real3*) comdMalloc(maxTotalAtoms*sizeof(real3));
+    atoms->p =        (real3*) comdMalloc(maxTotalAtoms*sizeof(real3));
+    atoms->f =        (real3*) comdMalloc(maxTotalAtoms*sizeof(real3));
+-   atoms->U =        (real_t*)comdMalloc(maxTotalAtoms*sizeof(real_t));
+ 
+    atoms->nLocal = 0;
+    atoms->nGlobal = 0;
+@@ -43,7 +42,6 @@
+       zeroReal3(atoms->r[iOff]);
+       zeroReal3(atoms->p[iOff]);
+       zeroReal3(atoms->f[iOff]);
+-      atoms->U[iOff] = 0.;
+    }
+ 
+    return atoms;
+@@ -56,7 +54,6 @@
+    freeMe(atoms,r);
+    freeMe(atoms,p);
+    freeMe(atoms,f);
+-   freeMe(atoms,U);
+    comdFree(atoms);
+ }
+ 
+diff -ruN original/initAtoms.h final/initAtoms.h
+--- original/initAtoms.h	2026-11-16 14:30:34
++++ final/initAtoms.h	2026-11-16 14:30:34
+@@ -22,7 +22,6 @@
+    real3*  r;     //!< positions
+    real3*  p;     //!< momenta of atoms
+    real3*  f;     //!< forces 
+-   real_t* U;     //!< potential energy per atom
+ } Atoms;
+ 
+ 
+diff -ruN original/linkCells.c final/linkCells.c
+--- original/linkCells.c	2026-11-16 14:30:34
++++ final/linkCells.c	2026-11-16 14:30:34
+@@ -328,10 +328,15 @@
+    const int jOff = MAXATOMS*jBox+jAtom;
+    atoms->gid[jOff] = atoms->gid[iOff];
+    atoms->iSpecies[jOff] = atoms->iSpecies[iOff];
+-   memcpy(atoms->r[jOff], atoms->r[iOff], sizeof(real3));
+-   memcpy(atoms->p[jOff], atoms->p[iOff], sizeof(real3));
+-   memcpy(atoms->f[jOff], atoms->f[iOff], sizeof(real3));
+-   memcpy(atoms->U+jOff,  atoms->U+iOff,  sizeof(real_t));
++   const real_t* restrict ri = atoms->r[iOff];
++   real_t* restrict rj = atoms->r[jOff];
++   rj[0] = ri[0]; rj[1] = ri[1]; rj[2] = ri[2];
++   const real_t* restrict pi = atoms->p[iOff];
++   real_t* restrict pj = atoms->p[jOff];
++   pj[0] = pi[0]; pj[1] = pi[1]; pj[2] = pi[2];
++   const real_t* restrict fi = atoms->f[iOff];
++   real_t* restrict fj = atoms->f[jOff];
++   fj[0] = fi[0]; fj[1] = fi[1]; fj[2] = fi[2];
+ }
+ 
+ /// Get the index of the link cell that contains the specified
+diff -ruN original/ljForce.c final/ljForce.c
+--- original/ljForce.c	2026-11-16 14:30:34
++++ final/ljForce.c	2026-11-16 14:30:34
+@@ -153,12 +153,15 @@
+    // zero forces and energy
+    real_t ePot = 0.0;
+    s->ePotential = 0.0;
+-   int fSize = s->boxes->nTotalBoxes*MAXATOMS;
+    #pragma omp parallel for
+-   for (int ii=0; ii<fSize; ++ii)
++   for (int iBox=0; iBox<s->boxes->nLocalBoxes; ++iBox)
+    {
+-      zeroReal3(s->atoms->f[ii]);
+-      s->atoms->U[ii] = 0.;
++      int iOff = iBox*MAXATOMS;
++      int iEnd = iOff + s->boxes->nAtoms[iBox];
++      for (int ii=iOff; ii<iEnd; ++ii)
++      {
++         zeroReal3(s->atoms->f[ii]);
++      }
+    }
+    
+    real_t s6 = sigma*sigma*sigma*sigma*sigma*sigma;
+@@ -168,58 +171,135 @@
+ 
+    int nNbrBoxes = 27;
+ 
+-   // loop over local boxes
+-   #pragma omp parallel for reduction(+:ePot)
+-   for (int iBox=0; iBox<s->boxes->nLocalBoxes; iBox++)
++   // Third-law halving: process each unordered pair once.
++   // For local<->local pairs from box A<B, only A's pass handles them; the
++   // mirror force on the B-side atom is accumulated into per-thread shadow
++   // buffers (like local, unless the B atom is a halo copy, where mirror
++   // force is dead data). A final merge folds shadows into atoms->f.
++   // For iBox==jBox, only jOff>iOff is processed.
++   // Energetics are computed once per pair (0.5*eLocal on each side -> 1x eLocal total).
++   const int nLocal = s->boxes->nLocalBoxes;
++   const int nThreads = omp_get_max_threads();
++   // shadow force buffers: one per thread, sized nLocalBoxes*MAXATOMS real3
++   // (far fewer than nTotal since only local boxes can receive mirror writes)
++   static real3* shadowF = NULL;
++   static size_t shadowCap = 0;
++   size_t need = (size_t)nThreads*nLocal*MAXATOMS;
++   if (shadowCap < need)
+    {
+-      int nIBox = s->boxes->nAtoms[iBox];
+-   
+-      // loop over neighbors of iBox
+-      for (int jTmp=0; jTmp<nNbrBoxes; jTmp++)
++      real3* nf = (real3*) realloc(shadowF, need*sizeof(real3));
++      if (!nf) { fprintf(stderr, "shadowF realloc failed\n"); return 1; }
++      shadowF = nf;
++      shadowCap = need;
++   }
++
++   #pragma omp parallel reduction(+:ePot)
++   {
++      const int tid = omp_get_thread_num();
++      real3* myShadow = shadowF + (size_t)tid*nLocal*MAXATOMS;
++      // zero shadow for local slots only
++      for (int iBox=0; iBox<nLocal; iBox++)
+       {
+-         int jBox = s->boxes->nbrBoxes[iBox][jTmp];
+-         
+-         assert(jBox>=0);
+-         
+-         int nJBox = s->boxes->nAtoms[jBox];
+-         
+-         // loop over atoms in iBox
+-         for (int iOff=MAXATOMS*iBox; iOff<(iBox*MAXATOMS+nIBox); iOff++)
++         int iOff = iBox*MAXATOMS;
++         int iEnd = iOff + s->boxes->nAtoms[iBox];
++         for (int ii=iOff; ii<iEnd; ii++)
++            zeroReal3(myShadow[ii]);
++      }
++
++      #pragma omp for schedule(static)
++      for (int iBox=0; iBox<nLocal; iBox++)
++      {
++         int nIBox = s->boxes->nAtoms[iBox];
++
++         // loop over neighbors of iBox
++         for (int jTmp=0; jTmp<nNbrBoxes; jTmp++)
+          {
++            int jBox = s->boxes->nbrBoxes[iBox][jTmp];
+ 
+-            // loop over atoms in jBox
+-            for (int jOff=jBox*MAXATOMS; jOff<(jBox*MAXATOMS+nJBox); jOff++)
++            assert(jBox>=0);
++
++            // skip local boxes with index < iBox (they handle the pair)
++            if (jBox < iBox && jBox < nLocal) continue;
++
++            int nJBox = s->boxes->nAtoms[jBox];
++            int sameBox = (jBox == iBox);
++            const int jLocalBox = (jBox < nLocal);
++
++            // loop over atoms in iBox
++            for (int iOff=MAXATOMS*iBox; iOff<(iBox*MAXATOMS+nIBox); iOff++)
+             {
+-               real3 dr;
+-               real_t r2 = 0.0;
+-               for (int m=0; m<3; m++)
++               const real_t* ri = s->atoms->r[iOff];
++               int jStart = MAXATOMS*jBox;
++               int jEnd = jStart + nJBox;
++               if (sameBox)
+                {
+-                  dr[m] = s->atoms->r[iOff][m]-s->atoms->r[jOff][m];
+-                  r2+=dr[m]*dr[m];
++                  jStart = iOff+1;
++                  if (jStart >= jEnd) continue;
+                }
+-
+-               if ( r2 <= rCut2 && r2 > 0.0)
++               // loop over atoms in jBox
++               for (int jOff=jStart; jOff<jEnd; jOff++)
+                {
+-
+-                  // Important note:
+-                  // from this point on r actually refers to 1.0/r
+-                  r2 = 1.0/r2;
+-                  real_t r6 = s6 * (r2*r2*r2);
+-                  real_t eLocal = r6 * (r6 - 1.0) - eShift;
+-                  s->atoms->U[iOff] += 0.5*eLocal;
+-                  ePot += 0.5*eLocal;
+-
+-                  // different formulation to avoid sqrt computation
+-                  real_t fr = - 4.0*epsilon*r6*r2*(12.0*r6 - 6.0);
++                  real3 dr;
++                  real_t r2 = 0.0;
++                  const real_t* rj = s->atoms->r[jOff];
+                   for (int m=0; m<3; m++)
+                   {
+-                     s->atoms->f[iOff][m] -= dr[m]*fr;
++                     dr[m] = ri[m]-rj[m];
++                     r2+=dr[m]*dr[m];
+                   }
+-               }
+-            } // loop over atoms in jBox
+-         } // loop over atoms in iBox
+-      } // loop over neighbor boxes
+-   } // loop over local boxes in system
++
++                  if ( r2 <= rCut2 && r2 > 0.0)
++                  {
++
++                     // Important note:
++                     // from this point on r actually refers to 1.0/r
++                     r2 = 1.0/r2;
++                     real_t r6 = s6 * (r2*r2*r2);
++                     real_t eLocal = r6 * (r6 - 1.0) - eShift;
++                     ePot += jLocalBox ? eLocal : 0.5*eLocal;
++
++                     // different formulation to avoid sqrt computation
++                     real_t fr = - 4.0*epsilon*r6*r2*(12.0*r6 - 6.0);
++                     real_t* fi = s->atoms->f[iOff];
++                     fi[0] -= dr[0]*fr;
++                     fi[1] -= dr[1]*fr;
++                     fi[2] -= dr[2]*fr;
++
++                     // mirror force on the j-side atom (local only)
++                     if (jLocalBox)
++                     {
++                        real3* fj = &myShadow[jOff];
++                        (*fj)[0] += dr[0]*fr;
++                        (*fj)[1] += dr[1]*fr;
++                        (*fj)[2] += dr[2]*fr;
++                     }
++                  }
++               } // loop over atoms in jBox
++            } // loop over atoms in iBox
++         } // loop over neighbor boxes
++      } // loop over local boxes in system
++
++   }
++
++   // merge all threads' shadow buffers into the global forces
++   #pragma omp parallel for
++   for (int iBox=0; iBox<nLocal; iBox++)
++   {
++      int iOff = iBox*MAXATOMS;
++      int iEnd = iOff + s->boxes->nAtoms[iBox];
++      for (int ii=iOff; ii<iEnd; ii++)
++      {
++         real_t fx=0.0, fy=0.0, fz=0.0;
++         for (int t=0; t<nThreads; ++t)
++         {
++            const real3* fj = &shadowF[(size_t)t*nLocal*MAXATOMS + ii];
++            fx += (*fj)[0]; fy += (*fj)[1]; fz += (*fj)[2];
++         }
++         s->atoms->f[ii][0] += fx;
++         s->atoms->f[ii][1] += fy;
++         s->atoms->f[ii][2] += fz;
++      }
++   }
+ 
+    ePot = ePot*4.0*epsilon;
+    s->ePotential = ePot;
+diff -ruN original/parallel.c final/parallel.c
+--- original/parallel.c	2026-11-16 14:30:34
++++ final/parallel.c	2026-11-16 14:30:34
+@@ -7,6 +7,7 @@
+ 
+ #include "parallel.h"
+ 
++
+ #ifdef DO_MPI
+ #include <mpi.h>
+ #endif
+diff -ruN original/timestep.c final/timestep.c
+--- original/timestep.c	2026-11-16 14:30:34
++++ final/timestep.c	2026-11-16 14:30:34
+@@ -87,8 +87,7 @@
+    {
+       for (int iOff=MAXATOMS*iBox,ii=0; ii<s->boxes->nAtoms[iBox]; ii++,iOff++)
+       {
+-         int iSpecies = s->atoms->iSpecies[iOff];
+-         real_t invMass = 1.0/s->species[iSpecies].mass;
++         const real_t invMass = s->species[0].massInv;
+          s->atoms->r[iOff][0] += dt*s->atoms->p[iOff][0]*invMass;
+          s->atoms->r[iOff][1] += dt*s->atoms->p[iOff][1]*invMass;
+          s->atoms->r[iOff][2] += dt*s->atoms->p[iOff][2]*invMass;
+@@ -109,8 +108,7 @@
+    {
+       for (int iOff=MAXATOMS*iBox,ii=0; ii<s->boxes->nAtoms[iBox]; ii++,iOff++)
+       {
+-         int iSpecies = s->atoms->iSpecies[iOff];
+-         real_t invMass = 0.5/s->species[iSpecies].mass;
++         const real_t invMass = 0.5*s->species[0].massInv;
+          kenergy += ( s->atoms->p[iOff][0] * s->atoms->p[iOff][0] +
+          s->atoms->p[iOff][1] * s->atoms->p[iOff][1] +
+          s->atoms->p[iOff][2] * s->atoms->p[iOff][2] )*invMass;
