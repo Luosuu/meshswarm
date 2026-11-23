@@ -178,6 +178,7 @@ async def evolve(
     model: Model,
     *,
     reviewer: Model | None = None,
+    sub_model: Model | None = None,
     generations: int = 3,
     population: int = 2,
     control: bool | int = False,
@@ -185,6 +186,7 @@ async def evolve(
     out: str | Path = "evolve-run",
     limits: Limits | None = None,
     pricing: Pricing | None = None,
+    sub_pricing: Pricing | None = None,
     grade: Grader | None = None,
     rubric: str = "",
     lessons: str = "",
@@ -235,7 +237,8 @@ async def evolve(
                 target = gen_dir / label / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(text, encoding="utf-8")
-            result = await run_mesh(goal, model, agents=agents, workspace=gen_dir / label, echo=echo, pricing=pricing, tools=tools,
+            result = await run_mesh(goal, model, agents=agents, workspace=gen_dir / label, echo=echo, pricing=pricing,
+                                    sub_model=sub_model, sub_pricing=sub_pricing, tools=tools,
                                     protect=protect if protect is not None else [deliverable],
                                     limits=dataclasses.replace(limits) if limits else None)
             if grade is not None:

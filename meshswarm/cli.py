@@ -145,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--workspace", help="workspace folder (default: runs/<timestamp>)")
     p.add_argument("--base-url", default=_env("MESH_BASE_URL", "OPENAI_BASE_URL"), help="OpenAI-compatible base URL, e.g. http://localhost:8000/v1 [env MESH_BASE_URL]")
     p.add_argument("--model", default=_env("MESH_MODEL"), help="model name served by the endpoint [env MESH_MODEL]")
+    p.add_argument("--sub-base-url", default=_env("MESH_SUB_BASE_URL"), help="optional separate endpoint for delegate() sub-agents [env MESH_SUB_BASE_URL]")
+    p.add_argument("--sub-model", default=_env("MESH_SUB_MODEL"), help="optional separate model for delegate() sub-agents [env MESH_SUB_MODEL]")
     p.add_argument("--api-key-env", default="MESH_API_KEY", help="name of the env var holding the API key (default MESH_API_KEY)")
     p.add_argument("--api-key-file", default=_env("MESH_API_KEY_FILE"), help="file holding the API key (bare key or NAME=key); overrides --api-key-env [env MESH_API_KEY_FILE]")
     p.add_argument("--max-completion-tokens", type=int, help="max_tokens sent with every request")
@@ -154,11 +156,15 @@ def main(argv: list[str] | None = None) -> int:
     d = Limits()
     p.add_argument("--max-agents", type=int, default=d.max_agents, help="across all teams")
     p.add_argument("--max-steps", type=int, default=d.max_steps_per_agent, help="model calls per agent")
+    p.add_argument("--sub-max-steps", type=int, default=d.max_steps_per_subagent, help="optional step cap per delegate() sub-agent")
     p.add_argument("--max-tokens", type=int, default=d.max_total_tokens, help="token budget (per team), cached tokens included")
     p.add_argument("--max-cost", type=float, help="dollar budget (per team; soft, hard stop at 1.25x). Needs known or given prices")
     p.add_argument("--price-input", type=float, help="USD per million uncached input tokens (overrides the built-in table)")
     p.add_argument("--price-cached", type=float, help="USD per million cached input tokens")
     p.add_argument("--price-output", type=float, help="USD per million output tokens")
+    p.add_argument("--sub-price-input", type=float, help="USD per million uncached input tokens for --sub-model")
+    p.add_argument("--sub-price-cached", type=float, help="USD per million cached input tokens for --sub-model")
+    p.add_argument("--sub-price-output", type=float, help="USD per million output tokens for --sub-model")
     p.add_argument("--concurrency", type=int, default=d.max_concurrent_calls, help="parallel model calls")
     p.add_argument("--compact-at", type=int, default=d.compact_at_tokens, help="estimated context tokens that trigger compaction")
     p.add_argument("--timeout", type=float, default=d.timeout_s, help="wall-clock limit in seconds")
@@ -171,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     limits = Limits(
         max_agents=a.max_agents,
         max_steps_per_agent=a.max_steps,
+        max_steps_per_subagent=a.sub_max_steps,
         max_total_tokens=a.max_tokens,
         max_cost_usd=a.max_cost,
         max_concurrent_calls=a.concurrency,
@@ -190,11 +197,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             model = endpoints.get(None, None, None, None)
             pricing = _pricing(model.model, a.price_input, a.price_cached, a.price_output)
-            if a.max_cost is not None and pricing is None:
-                p.error(f"--max-cost needs prices: {model.model} is not in the built-in table, so pass --price-input/--price-cached/--price-output")
+            sub_model = endpoints.get(a.sub_base_url, a.sub_model, None, None) if (a.sub_model or a.sub_base_url) else None
+            sub_pricing = _pricing(sub_model.model, a.sub_price_input, a.sub_price_cached, a.sub_price_output) if sub_model else None
+            if a.max_cost is not None and (pricing is None or (sub_model is not None and sub_pricing is None)):
+                p.error("--max-cost needs prices for every active model; pass --price-* (and --sub-price-* when using --sub-model)")
             goal = open(a.goal[1:], encoding="utf-8").read() if a.goal.startswith("@") else a.goal
             run = run_mesh(goal, model, agents=_agents_arg(a.agents), workspace=workspace, limits=limits,
-                           echo=not a.quiet, pricing=pricing)
+                           echo=not a.quiet, pricing=pricing, sub_model=sub_model, sub_pricing=sub_pricing)
     except (ValueError, KeyError, OSError) as e:
         p.error(str(e))
     try:

@@ -240,11 +240,12 @@ class MeshAgent:
 
     async def _turn(self) -> None:
         world, lim = self.world, self.world.limits
+        step_limit = lim.max_steps_per_subagent if (self.parent and lim.max_steps_per_subagent is not None) else lim.max_steps_per_agent
         reminded = False
         while not self._halted():
-            if self.steps >= lim.max_steps_per_agent:
+            if self.steps >= step_limit:
                 self.status = "stopped"
-                world.log.emit("budget", self.name, reason=f"step limit {lim.max_steps_per_agent}")
+                world.log.emit("budget", self.name, reason=f"step limit {step_limit}")
                 return
             try:
                 await self._maybe_compact()

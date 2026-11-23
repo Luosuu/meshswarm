@@ -40,6 +40,8 @@ class TeamSpec:
     model: Model
     agents: int | list[str] = 2  # a count, or a list of roles
     pricing: Pricing | None = None
+    sub_model: Model | None = None  # optional distinct worker model for delegate() sub-agents
+    sub_pricing: Pricing | None = None
     max_total_tokens: int | None = None  # defaults to Limits.max_total_tokens
     max_cost_usd: float | None = None
     liaisons: int | list[str] = 1  # how many of the first agents are liaisons, or their names (e.g. ["agent-1"])
@@ -98,7 +100,7 @@ def _agent_rows(world: World) -> list[dict[str, Any]]:
     rows = []
     for a in world.roster(include_subs=True):
         agent = world.agents[a["name"]]
-        pricing = world.teams[agent.team].pricing
+        _, pricing = world.teams[agent.team].model_for(bool(agent.parent))
         rows.append({
             **a,
             "steps": agent.steps,
@@ -117,17 +119,21 @@ async def run_mesh(
     limits: Limits | None = None,
     echo: bool = True,
     pricing: Pricing | None = None,
+    sub_model: Model | None = None,
+    sub_pricing: Pricing | None = None,
     tools: list[ExtraTool] | None = None,
     protect: list[str] | None = None,
 ) -> RunResult:
     """Create `agents` peers (a count, or a list of roles), give them the goal, run.
+    `sub_model` optionally routes private `delegate()` sub-agents to a separate worker model.
     `tools` adds your own tools (see `ExtraTool`) to every agent; none are added by default.
     `protect` names the deliverable files (glob patterns, default FINAL.md): once the goal task is
     completed they can no longer be changed, so a late edit cannot spoil finished work."""
     limits = limits or Limits()
     workspace = Path(workspace).resolve()
     log = EventLog(workspace / ".mesh" / "events.jsonl", echo=echo)
-    world = World(workspace, model, limits, log, pricing, extra_tools=check_extra_tools(tools or []))
+    world = World(workspace, model, limits, log, pricing, sub_model=sub_model, sub_pricing=sub_pricing,
+                  extra_tools=check_extra_tools(tools or []))
     if protect is not None:
         world.protect = list(protect)
 
@@ -180,6 +186,7 @@ async def run_teams(
              teams=[{"name": t.name, "goal": t.goal, "roles": _roles(t)} for t in teams])
     for spec in teams:
         world.add_team(spec.name, spec.model, goal=spec.goal, pricing=spec.pricing,
+                       sub_model=spec.sub_model, sub_pricing=spec.sub_pricing,
                        max_total_tokens=spec.max_total_tokens, max_cost_usd=spec.max_cost_usd)
 
     seeds: list[tuple[TeamSpec, int, list[str], set[str]]] = []
