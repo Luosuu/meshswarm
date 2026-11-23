@@ -52,7 +52,10 @@ if [ ! -f "$ROOT/openmodelica.sif" ]; then
 fi
 apptainer exec --containall --no-home "$ROOT/openmodelica.sif" omc --version
 
-echo "=== [3/4] Cloning ORNL TRANSFORM-Library & TRANSFORM-UnitTests ==="
+echo "=== [3/4] Cloning Modelica Standard Library v4.0.0, ORNL TRANSFORM-Library & TRANSFORM-UnitTests ==="
+if [ ! -d "$ROOT/repos/ModelicaStandardLibrary/.git" ]; then
+  git clone --depth 1 --branch v4.0.0 https://github.com/modelica/ModelicaStandardLibrary.git "$ROOT/repos/ModelicaStandardLibrary"
+fi
 if [ ! -d "$ROOT/repos/TRANSFORM-Library/.git" ]; then
   git clone --depth 1 https://github.com/WyrdLab/TRANSFORM-Library.git "$ROOT/repos/TRANSFORM-Library"
 fi
@@ -60,6 +63,6 @@ if [ ! -d "$ROOT/repos/TRANSFORM-UnitTests/.git" ]; then
   git clone --depth 1 https://github.com/WyrdLab/TRANSFORM-UnitTests.git "$ROOT/repos/TRANSFORM-UnitTests"
 fi
 
-echo "=== [4/4] Verifying TRANSFORM-Library package exists ==="
-ls -lh "$ROOT/repos/TRANSFORM-Library/TRANSFORM/package.mo" "$ROOT/openmodelica.sif"
+echo "=== [4/4] Verifying MSL + TRANSFORM packages & OpenModelica image ==="
+ls -lh "$ROOT/repos/ModelicaStandardLibrary/Modelica/package.mo" "$ROOT/repos/TRANSFORM-Library/TRANSFORM/package.mo" "$ROOT/openmodelica.sif"
 echo "INSTALL_MODELICA_JAX_OK"

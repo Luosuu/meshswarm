@@ -68,10 +68,10 @@ All core dependencies and a 5-stage end-to-end smoke test (`examples/modelica_ja
 ## 6. Phased Roadmap
 
 - [x] **Phase 0 — Rivanna Environment & End-to-End GPU Smoke Pipeline**: Containerized `OpenModelica 1.27.1`, `Rumoca`, `JAX` CUDA 12, `gradsolve` (`rodas5p_replay`), and `Optax` verified on Rivanna GPU (`smoke_pipeline.py`).
-- [ ] **Phase 1 — 3-Tier Non-Smooth / DAE Benchmark Suite**:
-  - *Tier 1*: Unsmoothed check-valve & orifice blanket cooling + Sieverts tritium extraction loop (fails raw `Rumoca.to_jax()` due to `events` and `residual_equations`).
-  - *Tier 2*: Real `TRANSFORM-UnitTests` thermo-fluid sub-loops (pumps, pipes, heat exchangers) requiring package flattening and smooth JAX `Medium` property fits.
-  - *Tier 3*: 15–20 stage cryogenic H/D/T distillation MESH DAE column testing sparse/tridiagonal stiff Jacobian optimization on GPU.
+- [x] **Phase 1 — 3-Tier Non-Smooth / DAE Benchmark Suite** (`tasks.py`, `grader.py`, `references.py`, `selftest.py` — verified on Rivanna RTX A6000 GPU in Slurm job `23379646`):
+  - *Tier 1 (`tier1_blanket_dae`)*: Unsmoothed check-valve & orifice blanket cooling + implicit cubic-Sieverts tritium loop (`omc_err = 3.47e-7`, `mass_err = 5.86e-15`, `adj_err = 9.10e-6`, `7.56 s` combined on GPU).
+  - *Tier 2 (`tier2_transform_hx`)*: ORNL `TRANSFORM.HeatExchangers.Simple_HX` (`PbLi` + `FLiBe` molten salt, `cv != cp` internal energy semantics) + Arrhenius wall tritium permeation (`omc_err = 9.05e-8`, `mass_err = 2.37e-15`, `adj_err = 8.57e-8`, `5.29 s` combined on GPU).
+  - *Tier 3 (`tier3_hdt_column`)*: 16-stage closed-recycle cryogenic H2/HD/T2 distillation MESH DAE column (`32` states + `16` implicit Antoine bubble-point equations; structure-aware scan + `@jax.custom_jvp` reaches **`0.143 s`** for 1,000 trajectories / `0.397 s` combined -> `7.0/10`, 18.7× faster forward than generic adaptive replay at `2.68 s` -> `4.0/10`, `omc_err = 1.90e-9`, `mass_err = 1.85e-15`).
 - [ ] **Phase 2 — `meshswarm` GPU-DAE Runner & Two-Tier Agent Routing**: Add GPU-pinned `ShellRunner` (`--nv` Apptainer + `CUDA_VISIBLE_DEVICES`), `examples/modelica_jax/run.py` multiplicative grader, and `Inkling-2-Small` (Architect) + `Inkling-2-Mini` (`delegate()` sub-agent Worker) support.
 - [ ] **Phase 3 — `meshevolve` Multi-Generation Experiments**: Run 3-generation swarm evolution with `--control` baselines on Rivanna GPUs; measure gate pass rates, GPU throughput gains, dollar cost, and cross-task lesson transfer from thermal loops to isotope distillation.
 - [ ] **Phase 4 — Closed-Loop Control & Core–Plant Co-Design**: Benchmark differentiable MPC / SHAC vs PPO over $10^5\text{–}10^6$ GPU episodes under plasma power ramps and pump trips, distill `< 1 ms` compact MLP controllers, and demonstrate coupled gradient co-design.
