@@ -45,6 +45,7 @@ class Limits:
     max_subagents: int = 16  # tree-style children created with delegate(), across the run
     max_depth: int = 2  # mesh agent = depth 0; its children 1; grandchildren 2
     max_steps_per_agent: int = 60  # model calls per agent over the whole run
+    max_steps_per_subagent: int | None = None  # optional tighter step cap for delegate() sub-agents (None = max_steps_per_agent)
     max_total_tokens: int = 2_000_000  # per team, cached included. Soft: agents wrap up; hard stop at 1.25x
     max_cost_usd: float | None = None  # per team, same soft/hard rule, in dollars (needs pricing)
     max_message_chars: int = 4000  # longer content belongs in a file
@@ -80,17 +81,36 @@ class Team:
     max_total_tokens: int = 2_000_000
     max_cost_usd: float | None = None
     goal: str = ""
+    sub_model: "Model | None" = None  # optional distinct model for private delegate() sub-agents
+    sub_pricing: Pricing | None = None
     liaisons: set[str] = field(default_factory=set)
     usage: Usage = field(default_factory=Usage)
+    sub_usage: Usage = field(default_factory=Usage)  # subset of `usage` spent by sub-agents when `sub_model` is set
     wrapping_up: bool = False
     budget_wrap: bool = False  # told to wrap up because a budget ran out
     goal_done: bool = False  # an agent completed this team's GOAL task: the team winds down
     halted: bool = False  # hard budget limit hit: the team's agents are stopped
     kept: dict[str, bytes] = field(default_factory=dict)  # protected files as they were when the goal was completed
 
+    def model_for(self, is_sub: bool) -> tuple["Model", Pricing | None]:
+        if is_sub and self.sub_model is not None:
+            return self.sub_model, self.sub_pricing
+        return self.model, self.pricing
+
     @property
     def cost_usd(self) -> float | None:
-        return self.pricing.cost(self.usage) if self.pricing else None
+        if self.pricing is None:
+            return None
+        if self.sub_model is None:
+            return self.pricing.cost(self.usage)
+        if self.sub_pricing is None:
+            return None
+        peer_u = Usage(
+            self.usage.prompt - self.sub_usage.prompt,
+            self.usage.cached - self.sub_usage.cached,
+            self.usage.completion - self.sub_usage.completion,
+        )
+        return self.pricing.cost(peer_u) + self.sub_pricing.cost(self.sub_usage)
 
     def budget_used(self) -> tuple[float, str]:
         """Largest fraction of any budget used so far, and which budget it is."""
@@ -108,6 +128,8 @@ class World:
     limits: Limits = field(default_factory=Limits)
     log: EventLog = field(default_factory=EventLog)
     pricing: Pricing | None = None
+    sub_model: "Model | None" = None  # optional distinct worker model for delegate() sub-agents on the default team
+    sub_pricing: Pricing | None = None
     comm: str = "liaisons"  # cross-team message rule: open | liaisons | exchange
     extra_tools: list = field(default_factory=list)  # tools.ExtraTool: added to every agent's tools
     protect: list = field(default_factory=lambda: ["FINAL.md"])  # deliverable files (glob patterns), kept as they are once the goal is completed
@@ -120,7 +142,8 @@ class World:
         self.teams: dict[str, Team] = {}
         if self.model is not None:
             self._add_team(Team("", self.model, self.workspace, self.pricing,
-                                self.limits.max_total_tokens, self.limits.max_cost_usd))
+                                self.limits.max_total_tokens, self.limits.max_cost_usd,
+                                sub_model=self.sub_model, sub_pricing=self.sub_pricing))
         self.agents: dict[str, MeshAgent] = {}
         self.tasks: dict[int, Task] = {}
         self._next_task_id = 1
@@ -142,6 +165,8 @@ class World:
         *,
         goal: str = "",
         pricing: Pricing | None = None,
+        sub_model: "Model | None" = None,
+        sub_pricing: Pricing | None = None,
         max_total_tokens: int | None = None,
         max_cost_usd: float | None = None,
     ) -> Team:
@@ -158,12 +183,14 @@ class World:
             max_total_tokens if max_total_tokens is not None else self.limits.max_total_tokens,
             max_cost_usd if max_cost_usd is not None else self.limits.max_cost_usd,
             goal,
+            sub_model=sub_model,
+            sub_pricing=sub_pricing,
         )
         (self.workspace / SHARED_DIR).mkdir(exist_ok=True)
         return self._add_team(team)
 
     def _add_team(self, team: Team) -> Team:
-        if team.max_cost_usd is not None and team.pricing is None:
+        if team.max_cost_usd is not None and (team.pricing is None or (team.sub_model is not None and team.sub_pricing is None)):
             raise ValueError(f"max_cost_usd needs pricing for team {team.name or 'main'!r}")
         team.workspace.mkdir(parents=True, exist_ok=True)
         self.teams[team.name] = team
@@ -541,13 +568,16 @@ class World:
 
     async def call_model(self, agent: "MeshAgent", messages: list[dict], tools: list[dict] | None) -> dict:
         team = self.teams[agent.team]
+        chosen_model, chosen_pricing = team.model_for(bool(agent.parent))
         async with self._call_slots:
             if self.done.is_set() or team.halted:
                 raise RunStopped
-            msg, usage = await team.model.complete(messages, tools, agent=agent.name)
+            msg, usage = await chosen_model.complete(messages, tools, agent=agent.name)
         team.usage = team.usage + usage
+        if agent.parent and team.sub_model is not None:
+            team.sub_usage = team.sub_usage + usage
         agent.usage = agent.usage + usage
-        cost = team.pricing.cost(usage) if team.pricing else None
+        cost = chosen_pricing.cost(usage) if chosen_pricing else None
         self.log.emit("usage", agent.name, team=team.name or None, **usage.as_dict(), cost=cost)
         fraction, which = team.budget_used()
         if fraction >= 1.25:

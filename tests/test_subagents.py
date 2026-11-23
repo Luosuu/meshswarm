@@ -229,6 +229,45 @@ class SubAgentsInTeams(unittest.TestCase):
         self.assertAlmostEqual(team_a["cost_usd"], 5 * 0.001)  # 3 parent calls + 2 child calls, all billed to team a
         self.assertIn("(with sub-agents: $0.0050)", (r.workspace / ".mesh" / "report.md").read_text())
 
+    def test_two_tier_sub_model_and_sub_step_cap(self):
+        def policy(agent, msgs):
+            if agent == "agent-1":
+                plan = [
+                    call("delegate", task="worker job", name="w", wait=True),
+                    call("complete_task", task_id=1, result="done"),
+                    call("wait"),
+                ]
+                return plan[min(step(msgs), 2)]
+            if agent == "agent-1:w":
+                if step(msgs) == 0:
+                    return call("delegate", task="grandchild job", name="g", wait=True)
+                return call("list_files", path=f"loop_{step(msgs)}")  # hits max_steps_per_subagent=2
+            return call("report", result="leaf ok")
+
+        arch_model = ScriptedModel(policy, tokens_per_call=Usage(prompt=1000))
+        work_model = ScriptedModel(policy, tokens_per_call=Usage(prompt=1000))
+        arch_price = Pricing(10.0, 1.0, 10.0)  # $0.01 per 1k uncached prompt tokens
+        work_price = Pricing(1.0, 0.1, 1.0)    # $0.001 per 1k uncached prompt tokens
+
+        r = asyncio.run(run_mesh(
+            "goal",
+            arch_model,
+            agents=1,
+            workspace=tempfile.mkdtemp(),
+            limits=Limits(timeout_s=10, nudges=0, max_steps_per_agent=10, max_steps_per_subagent=2),
+            echo=False,
+            pricing=arch_price,
+            sub_model=work_model,
+            sub_pricing=work_price,
+        ))
+        self.assertEqual({a for a, _ in arch_model.calls}, {"agent-1"})
+        self.assertEqual({a for a, _ in work_model.calls}, {"agent-1:w", "agent-1:w:g"})
+        child_row = next(a for a in r.agents if a["name"] == "agent-1:w")
+        self.assertEqual(child_row["status"], "stopped")
+        self.assertEqual(child_row["steps"], 2)  # stopped by max_steps_per_subagent=2, while parent had 10
+        expected_cost = len(arch_model.calls) * 0.01 + len(work_model.calls) * 0.001
+        self.assertAlmostEqual(r.cost_usd, expected_cost)
+
 
 if __name__ == "__main__":
     unittest.main()

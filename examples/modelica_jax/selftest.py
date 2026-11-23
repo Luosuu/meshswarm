@@ -1,15 +1,6 @@
-"""Phase 1 end-to-end self-test across all 3 Modelica-to-JAX benchmark tiers.
+"""Phase 1/2 end-to-end self-test across all 3 Modelica-to-JAX benchmark tiers.
 
-Verifies on live OpenModelica (`omc`) + Rumoca + JAX (GPU on Rivanna):
-  1. Direct `Rumoca.to_jax()` fails on all 3 benchmark `.mo` models, proving each
-     tier requires genuine structural/numerical refactoring.
-  2. Untouched starter skeletons score 0.0.
-  3. Three cheat/bug modes (`stop_gradient`, conservation leak, and Tier 2 wrong
-     `cp` instead of `cv` internal energy) are caught and score 0.0.
-  4. Reference JAX solvers for Tier 1, Tier 2, and Tier 3 pass all 4 multiplicative
-     gates against live OpenModelica DASSL gold runs.
-  5. On Tier 3 (16-stage cryogenic H2/HD/T2 column), structure-aware JAX scanning
-     outperforms generic 32x32 per-thread dense stiff LU on the GPU ladder.
+Reads standalone `.mo` models from `models/` and reference solvers from `references/`.
 """
 
 from __future__ import annotations
@@ -27,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rumoca as rm  # noqa: E402
 
 from grader import make_grader  # noqa: E402
-from references import REFERENCES, TIER3_DENSE_STIFF_REFERENCE  # noqa: E402
-from tasks import DELIVERABLE, TASKS, starting_files  # noqa: E402
+from meshswarm.shell import ShellRunner  # noqa: E402
+from tasks import DELIVERABLE, REFS_DIR, TASKS, reference_path, starting_files  # noqa: E402
 
 
 class _WS:
@@ -46,9 +37,14 @@ def verify_rumoca_fails_directly(ws: Path, model_file: str, model_name: str) -> 
     raise AssertionError(f"Expected direct Rumoca.to_jax() to fail on {model_name}, but it succeeded!")
 
 
-async def run_tier_selftest(name: str, n_ensemble: int) -> None:
+async def run_tier_selftest(name: str, n_ensemble: int = 1000, runner: ShellRunner | None = None) -> None:
     print(f"\n================ {name} ================", flush=True)
-    ws = Path(tempfile.mkdtemp(prefix=f"selftest-{name}-"))
+    scratch = Path(tempfile.gettempdir())
+    if runner is not None:
+        import os
+        if os.environ.get("MESH_RUN_SCRATCH"):
+            scratch = Path(os.environ["MESH_RUN_SCRATCH"])
+    ws = Path(tempfile.mkdtemp(prefix=f"selftest-{name}-", dir=scratch))
     try:
         for rel, content in starting_files(name).items():
             (ws / rel).write_text(content, encoding="utf-8")
@@ -57,21 +53,18 @@ async def run_tier_selftest(name: str, n_ensemble: int) -> None:
         why_rumoca = verify_rumoca_fails_directly(ws, task.model_file, task.model_name)
         print(f"[1] Direct Rumoca.to_jax() blocked as expected -> {why_rumoca}", flush=True)
 
-        grade = make_grader(name, n_ensemble=n_ensemble)
+        grade = make_grader(name, runner=runner, n_ensemble=n_ensemble)
 
-        # Skeleton must score 0.0
         g_skel = await grade(_WS(ws))
         print(f"[2] Starter skeleton -> score={g_skel.score} | {g_skel.reasons[:140]}", flush=True)
         assert g_skel.score == 0.0
 
-        # Reference solution must pass all 4 gates and score > 0
-        ref_code = REFERENCES[name]
+        ref_code = reference_path(name).read_text(encoding="utf-8")
         (ws / DELIVERABLE).write_text(ref_code, encoding="utf-8")
         g_ref = await grade(_WS(ws))
         print(f"[3] Verified reference -> score={g_ref.score} | {g_ref.reasons}", flush=True)
         assert g_ref.score is not None and g_ref.score > 0.0, f"Reference failed on {name}: {g_ref}"
 
-        # Cheat 1: detached gradient (zero parameter sensitivity) without using literal `stop_gradient`
         cheat_detach = ref_code + (
             "\n_orig_dc = differentiable_closure\n"
             "def differentiable_closure(y0_b, p_b):\n"
@@ -83,7 +76,6 @@ async def run_tier_selftest(name: str, n_ensemble: int) -> None:
         print(f"[4] Zero-grad cheat rejected -> score={g_detach.score} | {g_detach.reasons}", flush=True)
         assert g_detach.score == 0.0 and "[adjoint]" in g_detach.reasons
 
-        # Cheat 2: small 1e-6 mass conservation leak (passes 1e-4 trajectory check, caught by <1e-11 mass gate!)
         cheat_leak = ref_code + (
             "\n_orig_fe = forward_ensemble\n"
             "def forward_ensemble(y0_b, p_b):\n"
@@ -96,7 +88,6 @@ async def run_tier_selftest(name: str, n_ensemble: int) -> None:
         assert g_leak.score == 0.0 and "[conservation]" in g_leak.reasons
 
         if name == "tier2_transform_hx":
-            # Physics bug: mistaking cp_const for cv_const in TRANSFORM SimpleVolume internal energy
             wrong_cv = ref_code.replace("CV_PBLI = 9637.0, 188.0, 141.0", "CV_PBLI = 9637.0, 188.0, 188.0")
             (ws / DELIVERABLE).write_text(wrong_cv, encoding="utf-8")
             g_cv = await grade(_WS(ws))
@@ -104,12 +95,12 @@ async def run_tier_selftest(name: str, n_ensemble: int) -> None:
             assert g_cv.score == 0.0 and "[traj_gold]" in g_cv.reasons
 
         if name == "tier3_hdt_column":
-            # Compare generic 32x32 dense stiff Rodas5P solver vs fast structure-aware scan solver
-            (ws / DELIVERABLE).write_text(TIER3_DENSE_STIFF_REFERENCE, encoding="utf-8")
-            g_dense = await grade(_WS(ws))
-            print(f"[6] Tier 3 dense 32x32 Rodas5P baseline -> score={g_dense.score} | {g_dense.reasons}", flush=True)
-            assert g_dense.score is not None and g_dense.score > 0.0
-            assert g_ref.score >= g_dense.score
+            generic_code = (REFS_DIR / "tier3_generic_baseline.py").read_text(encoding="utf-8")
+            (ws / DELIVERABLE).write_text(generic_code, encoding="utf-8")
+            g_gen = await grade(_WS(ws))
+            print(f"[6] Tier 3 generic tsit5_replay baseline -> score={g_gen.score} | {g_gen.reasons}", flush=True)
+            assert g_gen.score is not None and g_gen.score > 0.0
+            assert g_ref.score >= g_gen.score
     finally:
         shutil.rmtree(ws, ignore_errors=True)
 
