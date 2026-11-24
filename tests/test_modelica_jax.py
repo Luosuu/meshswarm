@@ -74,6 +74,10 @@ class TestModelicaJaxTasks(unittest.TestCase):
                 g = asyncio.run(g_fn(_FakeResult(ws)))
                 self.assertEqual(g.score, 0.0)
                 self.assertIn("forbidden construct", g.reasons)
+
+            # Comments and docstrings mentioning omc or subprocess must NOT be falsely flagged
+            benign = '"""Verified offline against omc DASSL without subprocess."""\n# no omc or stop_gradient used\nx = 1\n'
+            self.assertIsNone(grader.forbidden_construct(benign))
         finally:
             shutil.rmtree(ws, ignore_errors=True)
 

@@ -137,7 +137,7 @@ def main() -> int:
     p.add_argument("--sub-api-key-name", default="TINKER_API_KEY")
     p.add_argument("--sub-max-completion-tokens", type=int, default=16384)
     p.add_argument("--sub-context-window", type=int, default=262144)
-    p.add_argument("--sub-max-steps", type=int, default=25, help="step cap per delegate() sub-agent")
+    p.add_argument("--sub-max-steps", type=int, default=35, help="step cap per delegate() sub-agent")
     p.add_argument("--sub-price-input", type=float)
     p.add_argument("--sub-price-cached", type=float)
     p.add_argument("--sub-price-output", type=float)
@@ -147,9 +147,10 @@ def main() -> int:
     p.add_argument("--population", type=int, default=2)
     p.add_argument("--controls", type=int, default=0, help="swarms per generation that get no lessons")
     p.add_argument("--agents", default="3", help="starting peer count or comma-separated roles")
-    p.add_argument("--max-cost", type=float, default=4.0, help="dollar budget per swarm")
+    p.add_argument("--max-cost", type=float, default=3.5, help="dollar budget per swarm")
     p.add_argument("--max-tokens", type=int, default=400_000_000)
-    p.add_argument("--max-steps", type=int, default=120)
+    p.add_argument("--max-steps", type=int, default=300)
+    p.add_argument("--concurrency", type=int, default=4)
     p.add_argument("--max-agents", type=int, default=8)
     p.add_argument("--max-subagents", type=int, default=32)
     p.add_argument("--timeout", type=float, default=7200, help="seconds per swarm")
@@ -209,6 +210,7 @@ def main() -> int:
         max_cost_usd=a.max_cost,
         max_steps_per_agent=a.max_steps,
         max_steps_per_subagent=a.sub_max_steps if sub_model is not None else None,
+        max_concurrent_calls=a.concurrency,
         timeout_s=a.timeout,
         max_total_tokens=a.max_tokens,
         compact_at_tokens=a.compact_at,

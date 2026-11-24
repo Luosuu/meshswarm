@@ -19,5 +19,6 @@ trap 'rm -rf "$MESH_LOCAL"' EXIT
 
 echo "Host: $(hostname) | command network: $MESH_RUN_NETWORK"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+KEY_FILE="${TINKER_KEY_FILE:-/scratch/$USER/meshswarm/.tinker_key}"
 cd "$REPO"
-python examples/modelica_jax/run.py --require-gpu --api-key-file /scratch/$USER/meshswarm/.tinker_key "$@"
+python examples/modelica_jax/run.py --require-gpu --api-key-file "$KEY_FILE" "$@"

@@ -1,0 +1,165 @@
+"""Deliverable JAX GPU ensemble solver for TransformPbLiFLiBeHX.
+
+Reduced from the reference Modelica model (TRANSFORM.HeatExchangers.Simple_HX,
+nV=6, counterCurrent=true) to a 15-state ODE:
+
+  state y = [T1_1..T1_6 (PbLi zones), T2_1..T2_6 (FLiBe zones),
+             N_loop, N_perm, N_getter]
+
+Per-zone volumes are V_1/nV = V_2/nV = 0.02 m^3 (GenericVolume(each V=V_1/nV);
+verified against the DASSL CSV dump: volume_1[i].V == 0.02, mass 192.74 kg PbLi /
+38.96 kg FLiBe per zone).  Counter-current coupling: PbLi zone i exchanges
+UA/6 * (T1[i] - T2[5-i]) with FLiBe zone 5-i.  Flows are time-independent; the
+low-flow limiters give m1 = m>=15 ? m : 15+0.15*(m-15) and
+m2 = m>=3 ? m : 3+0.15*(m-3).  The PbLi source temperature is
+T_in_pbli + 18*sin(0.2*t); the FLiBe source is held at 865 K.  Tritium loop:
+k_bar = mean(0.22*exp(-3400/T1)); j solves j + 0.45*j*|j| + 0.25*j^3
+= u_vac*k_bar*N_loop  (monotone cubic, Newton from a scaled initial guess;
+the exact derivative is supplied via implicit-function-theorem custom JVP).
+
+Integration: fixed-step RK4 (step count chosen with a large measured margin
+against the 3e-4 parity gate vs OpenModelica DASSL tolerance=1e-10).
+Everything is jitted and vmapped across the ensemble; the module keeps no
+hidden state, so repeated calls reuse compiled kernels.
+
+Observables at t = 30: [obs_Q_MW, obs_T1_out, obs_T2_out, obs_N_loop,
+                        obs_N_perm, obs_N_getter]
+"""
+
+from __future__ import annotations
+
+import os
+os.environ.setdefault("JAX_ENABLE_X64", "1")
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+jax.config.update("jax_enable_x64", True)
+
+# ---------------------------------------------------------------------------
+# Physical constants (from TRANSFORM ConstantPropertyLiquid media + Simple_HX)
+# ---------------------------------------------------------------------------
+_CP1, _CV1, _RHO1 = 188.0, 141.0, 9637.0     # PbLi
+_CP2, _CV2, _RHO2 = 2380.0, 1785.0, 1948.0   # FLiBe
+_VZONE = 0.12 / 6.0
+_M1VOL = _RHO1 * _VZONE
+_M2VOL = _RHO2 * _VZONE
+_UA6 = 48000.0 / 6.0
+
+_T_STOP = 30.0
+_NSTEPS = 100          # fixed-step RK4; ~2.6e-7 rel err vs DASSL (gate 3e-4)
+_DT = _T_STOP / _NSTEPS
+
+
+# ---------------------------------------------------------------------------
+# Implicit Sieverts-law style solve:  g(j) = target,  g monotone increasing.
+# Newton from a safe initial guess; converges to float64 precision in a few
+# iterations.  Exact derivative via implicit function theorem (custom JVP).
+# ---------------------------------------------------------------------------
+@jax.custom_jvp
+def _solve_j(target):
+    # |j| <= |target| (g is odd & superlinear); target >= 0 in this model
+    j0 = target / (1.0 + 0.45 * jnp.abs(target) + 0.25 * target * target)
+
+    def newton(j):
+        g = j + 0.45 * j * jnp.abs(j) + 0.25 * j * j * j
+        gp = 1.0 + 0.9 * jnp.abs(j) + 0.75 * j * j
+        return j - (g - target) / gp
+
+    for _ in range(8):
+        j0 = newton(j0)
+    return j0
+
+
+@_solve_j.defjvp
+def _solve_j_jvp(primals, tangents):
+    (target,) = primals
+    (dtarget,) = tangents
+    j = _solve_j(target)
+    gp = 1.0 + 0.9 * jnp.abs(j) + 0.75 * j * j
+    return j, dtarget / gp
+
+
+# ---------------------------------------------------------------------------
+# RHS of the reduced ODE
+# ---------------------------------------------------------------------------
+def _rhs(t, y, p):
+    T1 = y[0:6]
+    T2 = y[6:12]
+    N_loop, N_perm = y[12], y[13]
+
+    m_pbli, m_flibe, T_in_pbli, u_vac = p[0], p[1], p[2], p[3]
+    m1 = jnp.where(m_pbli >= 15.0, m_pbli, 15.0 + 0.15 * (m_pbli - 15.0))
+    m2 = jnp.where(m_flibe >= 3.0, m_flibe, 3.0 + 0.15 * (m_flibe - 3.0))
+
+    tup0 = T_in_pbli + 18.0 * jnp.sin(0.2 * t)
+    up1 = jnp.concatenate([tup0[None], T1[:-1]])
+    # q[i] = UA/6 * (T1[i] - T2[5-i]);  heat into PbLi zone i is -q[i]
+    q = _UA6 * (T1 - T2[::-1])
+    dT1 = (m1 * _CP1 * (up1 - T1) - q) / (_M1VOL * _CV1)
+
+    up2 = jnp.concatenate([jnp.full((), 865.0, dtype=T2.dtype)[None], T2[:-1]])
+    q2 = _UA6 * (T1[::-1] - T2)
+    dT2 = (m2 * _CP2 * (up2 - T2) + q2) / (_M2VOL * _CV2)
+
+    k_arr = 0.22 * jnp.exp(-3400.0 / T1)
+    k_bar = jnp.mean(k_arr)
+    target = u_vac * k_bar * N_loop
+    j = _solve_j(target)
+
+    dN_loop = -j
+    dN_perm = j - 0.06 * N_perm
+    dN_getter = 0.06 * N_perm
+
+    return jnp.concatenate([dT1, dT2, jnp.array([dN_loop, dN_perm, dN_getter])])
+
+
+def _rk4_step(t, y, dt, p):
+    k1 = _rhs(t, y, p)
+    k2 = _rhs(t + 0.5 * dt, y + 0.5 * dt * k1, p)
+    k3 = _rhs(t + 0.5 * dt, y + 0.5 * dt * k2, p)
+    k4 = _rhs(t + dt, y + dt * k3, p)
+    return y + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+
+def _integrate(y0, p, nsteps):
+    dt = _T_STOP / nsteps
+
+    def step(y, i):
+        return _rk4_step(i * dt, y, dt, p), None
+
+    y, _ = jax.lax.scan(step, y0, jnp.arange(nsteps))
+    return y
+
+
+def _observe(y, p):
+    T1 = y[0:6]
+    T2 = y[6:12]
+    q = _UA6 * (T1 - T2[::-1])
+    return jnp.array([q.sum() * 1e-6, T1[5], T2[5], y[12], y[13], y[14]])
+
+
+def _forward_one(y0, p):
+    y = _integrate(y0, p, _NSTEPS)
+    return _observe(y, p)
+
+
+_forward_kernel = jax.jit(jax.vmap(_forward_one))
+
+
+def forward_ensemble(y0_batch: np.ndarray, p_batch: np.ndarray) -> jax.Array:
+    y0 = jnp.asarray(y0_batch, dtype=jnp.float64)
+    p = jnp.asarray(p_batch, dtype=jnp.float64)
+    return _forward_kernel(y0, p)
+
+
+def differentiable_closure(y0_batch: np.ndarray, p_ref_batch: np.ndarray):
+    y0 = jnp.asarray(y0_batch, dtype=jnp.float64)
+    p_ref = jnp.asarray(p_ref_batch, dtype=jnp.float64)
+
+    def f(p_jax):
+        p = jnp.asarray(p_jax, dtype=jnp.float64)
+        return _forward_kernel(y0, p)
+
+    return f

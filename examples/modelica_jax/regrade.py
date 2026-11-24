@@ -43,6 +43,8 @@ async def main() -> int:
 
     scratch = os.environ.get("MESH_RUN_SCRATCH")
     for src in a.workspaces:
+        if not Path(src).is_dir():
+            continue
         tmp_root = Path(tempfile.mkdtemp(prefix="regrade-mjax-", dir=scratch))
         ws = tmp_root / "ws"
         try:
