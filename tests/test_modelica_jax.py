@@ -104,6 +104,21 @@ class TestModelicaJaxTasks(unittest.TestCase):
 
         asyncio.run(go())
 
+    def test_phase4_artifacts_and_metrics_verified(self) -> None:
+        import json
+
+        p4 = MJAX / "phase4"
+        for fname in ("plant_env.py", "rl_benchmark.py", "distill_mlp.py", "codesign.py", "run_phase4.py"):
+            self.assertTrue((p4 / fname).is_file(), f"missing {fname}")
+
+        metrics_path = ROOT / "results" / "modelica_jax" / "phase4_metrics.json"
+        self.assertTrue(metrics_path.is_file())
+        m = json.loads(metrics_path.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(m["control_benchmark"]["ppo_model_free"]["total_episodes"], 1_000_000)
+        self.assertLess(m["realtime_mlp_distillation"]["param_count"], 10_000)
+        self.assertLess(m["realtime_mlp_distillation"]["cpu_latency_us"]["p99_9"], 1000.0)
+        self.assertLess(m["coupled_plant_codesign"]["gradient_codesign"]["coupled_3solver_grad_fd_rel_err"], 1.0e-5)
+
 
 if __name__ == "__main__":
     unittest.main()
