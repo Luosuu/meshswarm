@@ -1,0 +1,56 @@
+udc-an28-1
+0, NVIDIA A100-SXM4-40GB, 595.71.05, 40960 MiB
+=== REGRADE tier1_blanket_dae ===
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier1-g1/gen-01/run-1/ -> score 0.0 | [adjoint] reverse-mode grad vs closure FD rel error 9.106e-04 >= 5e-5
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier1-g1/gen-01/run-2/ -> score 0.0 | [traj_gold] held-out case 3 `obs_T_blanket` got 826.106 vs OpenModelica 848.174 (rel err 2.602e-02 > 2.5e-04)
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier1-g2/gen-01/control/ -> score 0.0 | solver_jax.py timed out after 240s
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier1-g2/gen-01/run-1/ -> score 0.0 | solver_jax.py timed out after 240s
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier1-g2/gen-01/run-2/ -> score 0.0 | solver_jax.py failed (exit 1):  main
+    obs_got = np.asarray(mod.forward_ensemble(y0_test, p_test))
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/fad3ew-mjax-23388961/regrade-mjax-hkrxjboy/ws/solver_jax.py", line 26, in forward_ensemble
+    raise NotImplementedError("Implement GPU-vectorized stiff forward ensemble solver")
+NotImplementedError: Implement GPU-vectorized stiff forward ensemble solver
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier1-g3/gen-01/control/ -> score 0.0 | solver_jax.py failed (exit 1):  main
+    obs_got = np.asarray(mod.forward_ensemble(y0_test, p_test))
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/fad3ew-mjax-23388961/regrade-mjax-u_g_odu6/ws/solver_jax.py", line 26, in forward_ensemble
+    raise NotImplementedError("Implement GPU-vectorized stiff forward ensemble solver")
+NotImplementedError: Implement GPU-vectorized stiff forward ensemble solver
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier1-g3/gen-01/run-1/ -> score 6.0 | passed all 4 gates on gpu | 1k-fwd=0.2160s + 64-grad=0.6270s (total 0.8431s) | omc_err=3.62e-08, mass_err=7.99e-15, adj_err=8.15e-06/1.05e-03
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier1-g3/gen-01/run-2/ -> score 0.0 | solver_jax.py failed (exit 1):  main
+    obs_got = np.asarray(mod.forward_ensemble(y0_test, p_test))
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/fad3ew-mjax-23388961/regrade-mjax-j7cu9_c1/ws/solver_jax.py", line 26, in forward_ensemble
+    raise NotImplementedError("Implement GPU-vectorized stiff forward ensemble solver")
+NotImplementedError: Implement GPU-vectorized stiff forward ensemble solver
+=== REGRADE tier2_transform_hx ===
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier2-g1/gen-01/control/ -> score 5.0 | passed all 4 gates on gpu | 1k-fwd=1.2070s + 64-grad=0.2358s (total 1.4428s) | omc_err=3.11e-08, mass_err=3.11e-15, adj_err=1.33e-07/2.08e-06
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier2-g1/gen-01/run-1/ -> score 4.0 | passed all 4 gates on gpu | 1k-fwd=2.9392s + 64-grad=0.4947s (total 3.4339s) | omc_err=3.05e-08, mass_err=4.14e-15, adj_err=2.55e-07/2.08e-06
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier2-g1/gen-01/run-2/ -> score 9.0 | passed all 4 gates on gpu | 1k-fwd=0.0413s + 64-grad=0.0658s (total 0.1072s) | omc_err=1.34e-08, mass_err=1.78e-15, adj_err=1.24e-08/2.08e-06
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier2-g2/gen-01/control/ -> score 7.0 | passed all 4 gates on gpu | 1k-fwd=0.1311s + 64-grad=0.1317s (total 0.2628s) | omc_err=6.18e-08, mass_err=1.48e-15, adj_err=3.09e-08/2.08e-06
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier2-g2/gen-01/run-1/ -> score 10.0 | passed all 4 gates on gpu | 1k-fwd=0.0078s + 64-grad=0.0175s (total 0.0253s) | omc_err=1.63e-07, mass_err=1.63e-15, adj_err=2.30e-08/2.08e-06
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier2-g2/gen-01/run-2/ -> score 5.0 | passed all 4 gates on gpu | 1k-fwd=0.6658s + 64-grad=0.6634s (total 1.3292s) | omc_err=3.03e-08, mass_err=3.55e-15, adj_err=2.17e-08/2.08e-06
+=== REGRADE tier3_hdt_column ===
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier3-g1/gen-01/control/ -> score 0.0 | solver_jax.py failed (exit 1): ine 160, in main
+    jvp_grad[:, j] = np.asarray(jvp_fn(p_test_j, jnp.asarray(tang)))
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: can't apply forward-mode autodiff (jvp) to a custom_vjp function.
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier3-g1/gen-01/run-1/ -> score 0.0 | solver_jax.py failed (exit 1):  main
+    obs_got = np.asarray(mod.forward_ensemble(y0_test, p_test))
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/fad3ew-mjax-23388961/regrade-mjax-g33tifkn/ws/solver_jax.py", line 26, in forward_ensemble
+    raise NotImplementedError("Implement GPU-vectorized stiff forward ensemble solver")
+NotImplementedError: Implement GPU-vectorized stiff forward ensemble solver
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier3-g1/gen-01/run-2/ -> score 0.0 | solver_jax.py failed (exit 1):  main
+    obs_got = np.asarray(mod.forward_ensemble(y0_test, p_test))
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/fad3ew-mjax-23388961/regrade-mjax-id1yeskg/ws/solver_jax.py", line 26, in forward_ensemble
+    raise NotImplementedError("Implement GPU-vectorized stiff forward ensemble solver")
+NotImplementedError: Implement GPU-vectorized stiff forward ensemble solver
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier3-g2/gen-01/control/ -> score 8.0 | passed all 4 gates on gpu | 1k-fwd=0.0428s + 64-grad=0.1321s (total 0.1749s) | omc_err=5.18e-10, mass_err=2.01e-15, adj_err=1.19e-07/4.55e-05
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier3-g2/gen-01/run-1/ -> score 2.0 | passed all 4 gates on gpu | 1k-fwd=5.2384s + 64-grad=2.8066s (total 8.0450s) | omc_err=1.51e-10, mass_err=2.47e-15, adj_err=1.30e-07/4.75e-05
+/scratch/fad3ew/meshswarm/modelica_jax/runs/r1-tier3-g2/gen-01/run-2/ -> score 5.0 | passed all 4 gates on gpu | 1k-fwd=0.5512s + 64-grad=1.3122s (total 1.8634s) | omc_err=1.50e-10, mass_err=3.86e-15, adj_err=1.30e-07/4.75e-05
+REGRADE_CAMPAIGN_DONE

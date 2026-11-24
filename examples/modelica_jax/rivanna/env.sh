@@ -23,6 +23,9 @@ export OPENMODELICALIBRARY="$ROOT/repos/ModelicaStandardLibrary:$ROOT/repos/TRAN
 export JAX_ENABLE_X64=1
 export GRADSOLVE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
+if [ -f /etc/pki/tls/cert.pem ]; then
+  export SSL_CERT_FILE=/etc/pki/tls/cert.pem
+fi
 export PATH="$ROOT/.venv/bin:$PATH"
 
 CONTAINER_PATH="$ROOT/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

@@ -1,0 +1,196 @@
+"""Deliverable JAX GPU ensemble solver for CryoHDTColumn16.
+
+Pure-JAX, FP64, GPU-vectorized (vmap) ensemble integrator for the 16-stage
+closed-recycle cryogenic hydrogen isotope distillation MESH DAE column.
+
+State (32 differential states): x_H2[16], x_HD[16];  x_T2 = 1 - x_H2 - x_HD.
+Algebraic per stage: bubble-point Antoine equation solved by Newton iteration
+wrapped in a @jax.custom_jvp (Implicit Function Theorem) so reverse-mode AD
+never unrolls the root-finder.
+
+Observables at t = 25.0 (B, 7):
+  [obs_xH2_top, obs_xT2_bot, obs_T_top, obs_T_bot, obs_tot_H2, obs_tot_HD, obs_tot_T2]
+"""
+
+from __future__ import annotations
+
+import os
+os.environ.setdefault("JAX_ENABLE_X64", "1")
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+jax.config.update("jax_enable_x64", True)
+
+_N = 16
+_M = jnp.array([4.0] + [1.0] * 14 + [6.0], dtype=jnp.float64)
+_IDX = jnp.arange(_N, dtype=jnp.float64)
+_T_START = 11.5
+_V_FLOOD = 2.15
+_SIN_OMEGA = 0.25
+_SIN_AMP = 0.08
+
+# Antoine constants: P = exp(A - B / (T + C))
+_A_H2, _B_H2 = 9.45, 106.0
+_A_HD, _B_HD = 9.62, 129.0
+_A_T2, _B_T2 = 9.85, 156.0
+_C_ANT = 1.8
+
+
+def _psat(av, bv, t):
+    return jnp.exp(av - bv / (t + _C_ANT))
+
+
+def _bubble_g_and_gt(t, xh, xd, xt, pstage):
+    ph = _psat(_A_H2, _B_H2, t)
+    pd = _psat(_A_HD, _B_HD, t)
+    pt = _psat(_A_T2, _B_T2, t)
+    g = xh * ph + xd * pd + xt * pt - pstage
+    inv = 1.0 / (t + _C_ANT)
+    gt = (xh * ph * _B_H2 + xd * pd * _B_HD + xt * pt * _B_T2) * inv * inv
+    return g, gt
+
+
+def _newton_bubble(xh, xd, pstage, t_init):
+    xt = 1.0 - xh - xd
+
+    def body(carry):
+        t, i = carry
+        g, gt = _bubble_g_and_gt(t, xh, xd, xt, pstage)
+        t_new = t - g / gt
+        return t_new, i + 1
+
+    t0 = jnp.broadcast_to(jnp.asarray(t_init, dtype=jnp.float64), xh.shape)
+    t_fin, _ = jax.lax.while_loop(lambda c: c[1] < 60, body, (t0, 0))
+    return t_fin
+
+
+@jax.custom_jvp
+def bubble_T(xh, xd, pstage):
+    """Solve bubble-point Antoine equation for T given liquid mole fractions and P."""
+    t0 = jnp.full_like(xh, _T_START)
+    return _newton_bubble(xh, xd, pstage, t0)
+
+
+@bubble_T.defjvp
+def bubble_T_jvp(primals, tangents):
+    xh, xd, ps = primals
+    dxh, dxd, dps = tangents
+    t = bubble_T(xh, xd, ps)
+    xt = 1.0 - xh - xd
+    g, gt = _bubble_g_and_gt(t, xh, xd, xt, ps)
+    ph = _psat(_A_H2, _B_H2, t)
+    pd = _psat(_A_HD, _B_HD, t)
+    pt = _psat(_A_T2, _B_T2, t)
+    # dg = ph*dxh + pd*dxd + pt*dxt - dps,  dxt = -dxh - dxd
+    dg = (ph - pt) * dxh + (pd - pt) * dxd - dps
+    dt = -dg / gt
+    return t, dt
+
+
+def _rhs(t, y, p):
+    v_boil, d_rec_frac, dp_tray, p_top = p
+    v_eff = v_boil * (1.0 + _SIN_AMP * jnp.sin(_SIN_OMEGA * t))
+    eta = jnp.where(
+        v_eff <= _V_FLOOD,
+        0.92,
+        0.92 / (1.0 + 1.8 * (v_eff - _V_FLOOD) ** 2),
+    )
+    d_rec = d_rec_frac * v_eff
+    l_rect = v_eff - d_rec
+
+    xh = y[:_N]
+    xd = y[_N:]
+    xt = 1.0 - xh - xd
+    pstage = p_top + _IDX * dp_tray
+
+    ts = bubble_T(xh, xd, pstage)
+    ph = _psat(_A_H2, _B_H2, ts)
+    pd = _psat(_A_HD, _B_HD, ts)
+
+    yh = (1.0 - eta) * xh + eta * xh * ph / pstage
+    yd = (1.0 - eta) * xd + eta * xd * pd / pstage
+
+    rhs_h = jnp.zeros_like(xh)
+    rhs_d = jnp.zeros_like(xd)
+
+    # stage 1 (index 0)
+    rhs_h = rhs_h.at[0].set(v_eff * yh[1] - v_eff * xh[0])
+    rhs_d = rhs_d.at[0].set(v_eff * yd[1] - v_eff * xd[0])
+    # stages 2..7 (indices 1..6)
+    for i in range(1, 7):
+        rhs_h = rhs_h.at[i].set(l_rect * xh[i - 1] + v_eff * yh[i + 1] - l_rect * xh[i] - v_eff * yh[i])
+        rhs_d = rhs_d.at[i].set(l_rect * xd[i - 1] + v_eff * yd[i + 1] - l_rect * xd[i] - v_eff * yd[i])
+    # stage 8 (index 7)
+    rhs_h = rhs_h.at[7].set(l_rect * xh[6] + d_rec * xh[0] + v_eff * yh[8] - v_eff * xh[7] - v_eff * yh[7])
+    rhs_d = rhs_d.at[7].set(l_rect * xd[6] + d_rec * xd[0] + v_eff * yd[8] - v_eff * xd[7] - v_eff * yd[7])
+    # stages 9..15 (indices 8..14)
+    for i in range(8, 15):
+        rhs_h = rhs_h.at[i].set(v_eff * xh[i - 1] + v_eff * yh[i + 1] - v_eff * xh[i] - v_eff * yh[i])
+        rhs_d = rhs_d.at[i].set(v_eff * xd[i - 1] + v_eff * yd[i + 1] - v_eff * xd[i] - v_eff * yd[i])
+    # stage 16 (index 15)
+    rhs_h = rhs_h.at[15].set(v_eff * xh[14] - v_eff * yh[15])
+    rhs_d = rhs_d.at[15].set(v_eff * xd[14] - v_eff * yd[15])
+
+    return jnp.concatenate([rhs_h / _M, rhs_d / _M])
+
+
+def _observe(t_final, y, p):
+    xh = y[:_N]
+    xd = y[_N:]
+    xt = 1.0 - xh - xd
+    v_boil, d_rec_frac, dp_tray, p_top = p
+    pstage = p_top + _IDX * dp_tray
+    ts = bubble_T(xh, xd, pstage)
+    return jnp.array([
+        xh[0],
+        xt[15],
+        ts[0],
+        ts[15],
+        jnp.sum(_M * xh),
+        jnp.sum(_M * xd),
+        jnp.sum(_M * xt),
+    ])
+
+
+def _integrate(y0, p, t0=0.0, t1=25.0, dt=0.02):
+    n_steps = int(round((t1 - t0) / dt))
+    dt = (t1 - t0) / n_steps
+
+    def rk4_step(y, t):
+        k1 = _rhs(t, y, p)
+        k2 = _rhs(t + 0.5 * dt, y + 0.5 * dt * k1, p)
+        k3 = _rhs(t + 0.5 * dt, y + 0.5 * dt * k2, p)
+        k4 = _rhs(t + dt, y + dt * k3, p)
+        y_new = y + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        return y_new, None
+
+    ts = t0 + dt * jnp.arange(n_steps)
+    y_final, _ = jax.lax.scan(rk4_step, y0, ts)
+    return y_final
+
+
+def forward_ensemble(y0_batch, p_batch):
+    y0_batch = jnp.asarray(y0_batch, dtype=jnp.float64)
+    p_batch = jnp.asarray(p_batch, dtype=jnp.float64)
+
+    @jax.jit
+    def _run(y0b, pb):
+        def one(y0, p):
+            yT = _integrate(y0, p)
+            return _observe(25.0, yT, p)
+        return jax.vmap(one)(y0b, pb)
+
+    return _run(y0_batch, p_batch)
+
+
+def differentiable_closure(y0_batch, p_ref_batch):
+    y0_batch = jnp.asarray(y0_batch, dtype=jnp.float64)
+    p_ref_batch = jnp.asarray(p_ref_batch, dtype=jnp.float64)
+
+    @jax.jit
+    def _obs(p):
+        return forward_ensemble(y0_batch, p)
+
+    return _obs

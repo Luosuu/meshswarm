@@ -1,0 +1,242 @@
+--- starter/solver_jax.py
++++ control/solver_jax.py
+@@ -1,13 +1,24 @@
+-"""Deliverable JAX GPU ensemble solver for TransformPbLiFLiBeHX.
+-
+-Contract required by the grader:
+-  1. `forward_ensemble(y0_batch, p_batch) -> jax.Array`
+-     - `y0_batch`: float64 array of shape `(B, 15)`
+-     - `p_batch`:  float64 array of shape `(B, 4)` with columns ['m_flow_pbli', 'm_flow_flibe', 'T_in_pbli', 'u_vac']
+-     - returns float64 array of shape `(B, 6)` matching ['obs_Q_MW', 'obs_T1_out', 'obs_T2_out', 'obs_N_loop', 'obs_N_perm', 'obs_N_getter'] at t = 30.0.
+-  2. `differentiable_closure(y0_batch, p_ref_batch) -> Callable[[jax.Array], jax.Array]`
+-     - returns a pure JAX-traceable function `f(p_jax) -> obs_final_jax` of shape `(B, 6)`
+-       suitable for `jax.grad` around `p_ref_batch`.
++"""JAX GPU ensemble solver for TransformPbLiFLiBeHX (PbLi/FLiBe counter-current HX + tritium loop).
++
++Strategy
++--------
++The Modelica model (ORNL TRANSFORM Simple_HX, nV=6, counterCurrent=true) is reduced to an
++explicit 15-state ODE by exploiting the incompressible constant-property media:
++
++* Each fluid loop has a uniform mass flow fixed by the (piecewise-limited) source boundary:
++  mf1 = lim15(m_flow_pbli), mf2 = lim3(m_flow_flibe), where lim(x,c) = x if x>=c else c+0.15*(x-c).
++* Constant density + fixed volume => fixed inventory, der(m)=0, so only the 12 zone
++  temperatures and the 3 tritium amounts are states.
++* Heat exchange: Q_i = (T2[5-i]-T1[i])/R_val,  R_val = 6/UA = 1.25e-4, counter-current pairing.
++* Tritium Sieverts cubic j + 0.45 j|j| + 0.25 j^3 = u_vac*k_bar*N_loop with
++  k_bar = mean_i 0.22*exp(-3400/T1[i]).  j is the unique real root (f'(j) > 0), computed by
++  Newton and differentiated with a @jax.custom_jvp Implicit-Function-Theorem rule.
++
++States y[15] = [T1_1..T1_6, T2_1..T2_6, N_loop, N_perm, N_getter]
++Params p[4]  = [m_flow_pbli, m_flow_flibe, T_in_pbli, u_vac]
++
++Integration uses gradsolve's Rodas5P record-and-replay (device-recorded adaptive mesh,
++fixed-length lax.scan replay, reverse-mode differentiable through the per-step AD Jacobian).
+ """
+ 
+ from __future__ import annotations
+@@ -21,10 +32,197 @@
+ 
+ jax.config.update("jax_enable_x64", True)
+ 
+-
+-def forward_ensemble(y0_batch: np.ndarray, p_batch: np.ndarray) -> jax.Array:
+-    raise NotImplementedError("Implement GPU-vectorized stiff forward ensemble solver")
+-
+-
+-def differentiable_closure(y0_batch: np.ndarray, p_ref_batch: np.ndarray):
+-    raise NotImplementedError("Return a jax.grad-differentiable function mapping p_jax -> obs_final_jax")
++# ---------------------------------------------------------------- constants
++T0 = 298.15
++CP1, CV1, D1 = 188.0, 141.0, 9637.0      # PbLi
++CP2, CV2, D2 = 2380.0, 1785.0, 1948.0    # FLiBe
++V_ZONE = 0.12 / 6.0
++M1 = V_ZONE * D1                         # mass per zone side 1
++M2 = V_ZONE * D2                         # mass per zone side 2
++C1 = M1 * CV1                            # J/K per zone
++C2 = M2 * CV2                            # J/K per zone
++UA = 48000.0
++R_VAL = 6.0 / UA                         # K/W per zone thermal resistance
++T0_IN_FLIBE = 865.0
++T0_SNK = 900.0
++H_SNK1 = CP1 * (T0_SNK - T0)
++H_SNK2 = CP2 * (T0_SNK - T0)
++H_SRC2 = CP2 * (T0_IN_FLIBE - T0)
++N_ZONES = 6
++
++
++@jax.custom_jvp
++def _sieverts_root(rhs):
++    """Unique real root of 0.25 j^3 + 0.45 j|j| + j - rhs = 0.
++
++    f'(j) = 1 + 0.9|j| + 0.75 j^2 >= 1, so the root is unique and Newton converges
++    from any reasonable start. We use a safe initial guess and a fixed number of
++    iterations (residual is cubic and monotone).
++    """
++    def body(_, j):
++        f = 0.25 * j**3 + 0.45 * j * jnp.abs(j) + j - rhs
++        df = 1.0 + 0.9 * jnp.abs(j) + 0.75 * j**2
++        return j - f / df
++
++    j0 = rhs / (1.0 + 0.75 * rhs**2)  # safe damped guess
++    j = jax.lax.fori_loop(0, 40, body, j0)
++    return j
++
++
++@_sieverts_root.defjvp
++def _sieverts_root_jvp(primals, tangents):
++    (rhs,) = primals
++    (drhs,) = tangents
++    j = _sieverts_root(rhs)
++    df = 1.0 + 0.9 * jnp.abs(j) + 0.75 * j**2
++    return j, drhs / df
++
++
++def _limited_flow(x, c):
++    return jnp.where(x >= c, x, c + 0.15 * (x - c))
++
++
++def rhs(t, y, p):
++    """Reduced HX + tritium RHS.  y: (15,), p: (4,)."""
++    m_flow_pbli, m_flow_flibe, t_in_pbli, u_vac = p
++    t1 = y[:6]
++    t2 = y[6:12]
++    n_loop, n_perm, n_getter = y[12], y[13], y[14]
++
++    mf1 = _limited_flow(m_flow_pbli, 15.0)
++    mf2 = _limited_flow(m_flow_flibe, 3.0)
++
++    t_in1 = t_in_pbli + 18.0 * jnp.sin(0.20 * t)
++
++    h1 = CP1 * (t1 - T0)
++    h2 = CP2 * (t2 - T0)
++    h_src1 = CP1 * (t_in1 - T0)
++
++    # upstream enthalpies (interior streaming, upwind by constant positive flow;
++    # flows are kept positive by the limiters for any reasonable command, but the
++    # actualStream form is used for full sign robustness)
++    up_a1 = jnp.concatenate([jnp.array([h_src1]), h1[:-1]])
++    up_b1 = jnp.concatenate([h1[1:], jnp.array([H_SNK1])])
++    up_a2 = jnp.concatenate([jnp.array([H_SRC2]), h2[:-1]])
++    up_b2 = jnp.concatenate([h2[1:], jnp.array([H_SNK2])])
++
++    # heat transfer, counter-current pairing: zone i (1-based) <-> side 2 zone 7-i
++    # port flows (normal direction +1, backward side -flow)
++    ma1, mb1 = mf1, -mf1
++    ma2, mb2 = mf2, -mf2
++    ub_a1 = ma1 * jnp.where(ma1 > 0.0, up_a1, h1)
++    ub_b1 = mb1 * jnp.where(mb1 > 0.0, up_b1, h1)
++    ub1 = ub_a1 + ub_b1 + (t2[::-1] - t1) / R_VAL
++
++    ub_a2 = ma2 * jnp.where(ma2 > 0.0, up_a2, h2)
++    ub_b2 = mb2 * jnp.where(mb2 > 0.0, up_b2, h2)
++    ub2 = ub_a2 + ub_b2 + (t1[::-1] - t2) / R_VAL
++
++    dt1 = ub1 / C1
++    dt2 = ub2 / C2
++
++    k_arr = 0.22 * jnp.exp(-3400.0 / t1)
++    k_bar = jnp.mean(k_arr)
++    rhs_sieverts = u_vac * k_bar * n_loop
++    j_trit = _sieverts_root(rhs_sieverts)
++
++    dn_loop = -j_trit
++    dn_perm = j_trit - 0.06 * n_perm
++    dn_getter = 0.06 * n_perm
++
++    return jnp.concatenate([dt1, dt2, jnp.array([dn_loop, dn_perm, dn_getter])])
++
++
++# ---------------------------------------------------------------- integration
++from gradsolve.solvers.rodas5p_replay import (
++    record_rodas5p,
++    replay_rodas5p_jax,
++    make_rodas5p_frozen_mesh_kernel,
++)
++from gradsolve.base import Problem
++
++
++class _HXProblem:
++    """Minimal gradsolve problem interface (duck-typed)."""
++
++    def __init__(self):
++        self.dim = 15
++        self.f_jax = rhs
++        self.t0 = 0.0
++        self.t1 = 30.0
++        self.is_stiff = True
++        self.params0 = None
++
++
++def _get_problem():
++    return _HXProblem()
++
++
++_RTOL = 1e-10
++_ATOL = 1e-12
++_MAX_STEPS = 20000
++
++
++def _solve_batch(y0b, pb):
++    """Record adaptive Rodas5P mesh on device, return final states."""
++    problem = _get_problem()
++    yf, dts, n_acc, n_rej = record_rodas5p(
++        problem.f_jax, np.asarray(y0b), np.asarray(pb),
++        problem.t0, problem.t1, rtol=_RTOL, atol=_ATOL, max_steps=_MAX_STEPS,
++        recorder='jax')
++    return yf, dts
++
++
++def _obs_from_state(yb, pb):
++    t1 = yb[:, :6]
++    t2 = yb[:, 6:12]
++    q = jnp.sum((t1 - t2[:, ::-1]) / R_VAL, axis=1) * 1e-6
++    # sensor regStep: for |mf| > 1e-4, output equals downstream (zone-6) temperature
++    mf1 = _limited_flow(pb[:, 0], 15.0)
++    mf2 = _limited_flow(pb[:, 1], 3.0)
++    t1_out = _reg_step(mf1, t1[:, 5], jnp.full_like(mf1, T0_SNK))
++    t2_out = _reg_step(mf2, t2[:, 5], jnp.full_like(mf2, T0_SNK))
++    return jnp.stack([q, t1_out, t2_out, yb[:, 12], yb[:, 13], yb[:, 14]], axis=1)
++
++
++def _reg_step(x, y1, y2):
++    xs = 1e-4
++    return jnp.where(
++        x > xs, y1,
++        jnp.where(x < -xs, y2,
++                  x / xs * ((x / xs) ** 2 - 3.0) * (y2 - y1) / 4.0 + (y1 + y2) / 2.0))
++
++
++def forward_ensemble(y0_batch, p_batch):
++    y0b = np.asarray(y0_batch, dtype=np.float64)
++    pb = np.asarray(p_batch, dtype=np.float64)
++    if y0b.ndim == 1:
++        y0b = y0b[None, :]
++    if pb.ndim == 1:
++        pb = pb[None, :]
++    problem = _get_problem()
++    yf, dts = _solve_batch(y0b, pb)
++    return _obs_from_state(jnp.asarray(yf), jnp.asarray(pb))
++
++
++def differentiable_closure(y0_batch, p_ref_batch):
++    y0b = np.asarray(y0_batch, dtype=np.float64)
++    pb = np.asarray(p_ref_batch, dtype=np.float64)
++    if y0b.ndim == 1:
++        y0b = y0b[None, :]
++    if pb.ndim == 1:
++        pb = pb[None, :]
++    problem = _get_problem()
++    # record mesh once at reference parameters; closure replays along new params
++    kernel = make_rodas5p_frozen_mesh_kernel(
++        problem, y0b, pb, rtol=_RTOL, atol=_ATOL, max_steps=_MAX_STEPS)
++
++    y0_j = jnp.asarray(y0b)
++    p_ref_j = jnp.asarray(pb)
++
++    def f(p_jax):
++        p = jnp.asarray(p_jax, dtype=jnp.float64)
++        yf = kernel(y0_j, p)
++        return _obs_from_state(yf, p)
++
++    return f

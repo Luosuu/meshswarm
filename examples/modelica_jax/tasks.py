@@ -210,10 +210,12 @@ def task_text(name: str) -> str:
     t = TASKS[name]
     rungs = ", ".join(f"{s:g}s" for s in THRESHOLDS_S)
     omc_hint = (
-        "Set `setModelicaPath(getEnvironmentVar(\"OPENMODELICALIBRARY\"))`, `loadModel(Modelica)`, and "
-        "`loadFile(getEnvironmentVar(\"TRANSFORM_LIB\"))` in `.mos` scripts to inspect (`instantiateModel`) or simulate with `omc`."
+        "In `.mos` scripts for `omc`, load the libraries first:\n"
+        "  `setModelicaPath(getEnvironmentVar(\"OPENMODELICALIBRARY\")); loadModel(Modelica); "
+        "loadFile(getEnvironmentVar(\"TRANSFORM_LIB\"));`\n"
+        "Then call `instantiateModel(...)` to inspect flattened equations or `simulate(...)` to generate CSV trajectories."
         if t.needs_transform
-        else "Use `omc` to inspect or simulate the `.mo` file (`method=\"dassl\", tolerance=1e-10`) and compare your JAX outputs."
+        else "Use `omc script.mos` via `run_command` (e.g. `loadFile(\"" + t.model_file + "\"); simulate(" + t.model_name + ", stopTime=" + str(t.t_end) + ", tolerance=1e-10, method=\"dassl\", outputFormat=\"csv\");`) to generate exact reference outputs and compare against your JAX solver."
     )
     return f"""Build the fastest verified, differentiable JAX GPU ensemble solver for {t.title}.
 
@@ -221,7 +223,7 @@ def task_text(name: str) -> str:
 
 Your workspace holds:
   - `{t.model_file}`: the reference Modelica model (`t in [0, {t.t_end}]`). Direct `Rumoca.to_jax()` fails on this model; you must handle its package flattening, algebraic constraints, and non-smooth branches properly. Do not modify `{t.model_file}`.
-  - `{DELIVERABLE}`: the deliverable module you must implement.
+  - `{DELIVERABLE}`: the deliverable Python module that is graded (you may also leave a short summary of your approach and measurements in `FINAL.md`, but `{DELIVERABLE}` is what the grader runs — ensure `{DELIVERABLE}` is complete and verified before completing task #1).
 
 Required functions in `{DELIVERABLE}` (FP64 enabled):
   1. `forward_ensemble(y0_batch, p_batch)` -> `(B, {len(t.obs_names)})` final observables `{t.obs_names}` at `t = {t.t_end}` for initial states `(B, {t.n_states})` and parameters `(B, {len(t.param_names)})` = `{t.param_names}`.

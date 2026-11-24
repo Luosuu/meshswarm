@@ -1,0 +1,216 @@
+--- starter/solver_jax.py
++++ run-2/solver_jax.py
+@@ -1,13 +1,13 @@
+ """Deliverable JAX GPU ensemble solver for CryoHDTColumn16.
+ 
+-Contract required by the grader:
+-  1. `forward_ensemble(y0_batch, p_batch) -> jax.Array`
+-     - `y0_batch`: float64 array of shape `(B, 32)`
+-     - `p_batch`:  float64 array of shape `(B, 4)` with columns ['V_boil', 'd_rec_frac', 'dp_tray', 'P_top']
+-     - returns float64 array of shape `(B, 7)` matching ['obs_xH2_top', 'obs_xT2_bot', 'obs_T_top', 'obs_T_bot', 'obs_tot_H2', 'obs_tot_HD', 'obs_tot_T2'] at t = 25.0.
+-  2. `differentiable_closure(y0_batch, p_ref_batch) -> Callable[[jax.Array], jax.Array]`
+-     - returns a pure JAX-traceable function `f(p_jax) -> obs_final_jax` of shape `(B, 7)`
+-       suitable for `jax.grad` around `p_ref_batch`.
++Closed-recycle 16-stage cryogenic hydrogen isotope distillation column.
++32 differential states (x_H2[16], x_HD[16]); x_T2 = 1 - x_H2 - x_HD.
++16 algebraic bubble-point (Antoine) equations solved per stage per RHS call
++with a Newton iteration wrapped in a custom_jvp (Implicit Function Theorem).
++Hydraulic flooding efficiency drop above V_flood = 2.15 mol/s (C^1 branch).
++Total column inventories of H2/HD/T2 are exactly conserved by the flux-form RHS
++(telescoping), so any Runge-Kutta combination of stages conserves them to
++machine precision.
+ """
+ 
+ from __future__ import annotations
+@@ -17,14 +17,184 @@
+ 
+ import jax
+ import jax.numpy as jnp
++from jax import lax
+ import numpy as np
+ 
+ jax.config.update("jax_enable_x64", True)
+ 
+-
+-def forward_ensemble(y0_batch: np.ndarray, p_batch: np.ndarray) -> jax.Array:
+-    raise NotImplementedError("Implement GPU-vectorized stiff forward ensemble solver")
+-
+-
+-def differentiable_closure(y0_batch: np.ndarray, p_ref_batch: np.ndarray):
+-    raise NotImplementedError("Return a jax.grad-differentiable function mapping p_jax -> obs_final_jax")
++N = 16
++M = jnp.array([4.0] + [1.0] * 14 + [6.0], dtype=jnp.float64)
++V_FLOOD = 2.15
++
++_A_H2, _B_H2, _C_H2 = 9.45, 106.0, 1.8
++_A_HD, _B_HD, _C_HD = 9.62, 129.0, 1.8
++_A_T2, _B_T2, _C_T2 = 9.85, 156.0, 1.8
++
++_KN = jnp.arange(N, dtype=jnp.float64)
++
++
++def _psat(T, A, B, C):
++    return jnp.exp(A - B / (T + C))
++
++
++def _bubble_residual(T, xH2, xHD, P):
++    xT2 = 1.0 - xH2 - xHD
++    return (xH2 * _psat(T, _A_H2, _B_H2, _C_H2)
++            + xHD * _psat(T, _A_HD, _B_HD, _C_HD)
++            + xT2 * _psat(T, _A_T2, _B_T2, _C_T2)
++            - P)
++
++
++def _bubble_dT_residual(T, xH2, xHD, P):
++    xT2 = 1.0 - xH2 - xHD
++    d = T + 1.8
++    return (xH2 * _psat(T, _A_H2, _B_H2, _C_H2) * (_B_H2 / (d * d))
++            + xHD * _psat(T, _A_HD, _B_HD, _C_HD) * (_B_HD / (d * d))
++            + xT2 * _psat(T, _A_T2, _B_T2, _C_T2) * (_B_T2 / (d * d)))
++
++
++def _newton_T(xH2, xHD, P, iters=8):
++    T = jnp.full_like(P, 11.5)
++
++    def body(T, _):
++        f = _bubble_residual(T, xH2, xHD, P)
++        fp = _bubble_dT_residual(T, xH2, xHD, P)
++        T = T - f / fp
++        return T, None
++
++    T, _ = lax.scan(body, T, None, length=iters)
++    return T
++
++
++@jax.custom_jvp
++def _solve_T(xH2, xHD, P):
++    return _newton_T(xH2, xHD, P)
++
++
++@_solve_T.defjvp
++def _solve_T_jvp(primals, tangents):
++    xH2, xHD, P = primals
++    dxH2, dxHD, dP = tangents
++    T = _newton_T(xH2, xHD, P)
++    xT2 = 1.0 - xH2 - xHD
++    f_xH2 = _psat(T, _A_H2, _B_H2, _C_H2) - _psat(T, _A_T2, _B_T2, _C_T2)
++    f_xHD = _psat(T, _A_HD, _B_HD, _C_HD) - _psat(T, _A_T2, _B_T2, _C_T2)
++    f_T = _bubble_dT_residual(T, xH2, xHD, P)
++    dT = -(f_xH2 * dxH2 + f_xHD * dxHD - dP) / f_T
++    return T, dT
++
++
++def _rhs(t, y, p):
++    V_boil, d_rec_frac, dp_tray, P_top = p[..., 0], p[..., 1], p[..., 2], p[..., 3]
++    xH2 = y[..., :N]
++    xHD = y[..., N:]
++    xT2 = 1.0 - xH2 - xHD
++    P_stage = P_top[..., None] + _KN * dp_tray[..., None]
++
++    V_eff = V_boil * (1.0 + 0.08 * jnp.sin(0.25 * t))
++    eta = jnp.where(V_eff <= V_FLOOD, 0.92, 0.92 / (1.0 + 1.8 * (V_eff - V_FLOOD) ** 2))
++    D_rec = d_rec_frac * V_eff
++    L_rect = V_eff - D_rec
++
++    T = _solve_T(xH2, xHD, P_stage)
++    Psat_H2 = _psat(T, _A_H2, _B_H2, _C_H2)
++    Psat_HD = _psat(T, _A_HD, _B_HD, _C_HD)
++
++    Pn = P_stage
++    yH2 = (1.0 - eta[..., None]) * xH2 + eta[..., None] * xH2 * Psat_H2 / Pn
++    yHD = (1.0 - eta[..., None]) * xHD + eta[..., None] * xHD * Psat_HD / Pn
++
++    # Common terms
++    # For stages 1..6 (idx 1..6): L_rect*x[i-1] + V_eff*y[i+1] - L_rect*x[i] - V_eff*y[i]
++    # Stage 7 (idx 6) is in the 2..7 loop (stages 2..7 -> idx 1..6)
++    # Stage 8 (idx 7): L_rect*x[6] + D_rec*x[0] + V_eff*y[8] - V_eff*x[7] - V_eff*y[7]
++    # Stages 9..15 (idx 8..14): V_eff*x[i-1] + V_eff*y[i+1] - V_eff*x[i] - V_eff*y[i]
++    # Stage 16 (idx 15): V_eff*x[14] - V_eff*y[15]
++    # Stage 1 (idx 0): V_eff*y[1] - V_eff*x[0]
++
++    # Shift arrays
++    # Use masks via where on index
++    # assemble by explicit concatenation (no roll wraparound contamination)
++    d_H2 = jnp.concatenate([
++        V_eff[..., None] * (yH2[..., 1:2] - xH2[..., 0:1]),
++        (L_rect[..., None] * xH2[..., 0:6] + V_eff[..., None] * yH2[..., 2:8]
++         - L_rect[..., None] * xH2[..., 1:7] - V_eff[..., None] * yH2[..., 1:7]),
++        (L_rect[..., None] * xH2[..., 6:7] + D_rec[..., None] * xH2[..., 0:1]
++         + V_eff[..., None] * yH2[..., 8:9] - V_eff[..., None] * xH2[..., 7:8] - V_eff[..., None] * yH2[..., 7:8]),
++        (V_eff[..., None] * xH2[..., 7:14] + V_eff[..., None] * yH2[..., 9:16]
++         - V_eff[..., None] * xH2[..., 8:15] - V_eff[..., None] * yH2[..., 8:15]),
++        (V_eff[..., None] * xH2[..., 14:15] - V_eff[..., None] * yH2[..., 15:16]),
++    ], axis=-1) / M[None, :]
++
++    d_HD = jnp.concatenate([
++        V_eff[..., None] * (yHD[..., 1:2] - xHD[..., 0:1]),
++        (L_rect[..., None] * xHD[..., 0:6] + V_eff[..., None] * yHD[..., 2:8]
++         - L_rect[..., None] * xHD[..., 1:7] - V_eff[..., None] * yHD[..., 1:7]),
++        (L_rect[..., None] * xHD[..., 6:7] + D_rec[..., None] * xHD[..., 0:1]
++         + V_eff[..., None] * yHD[..., 8:9] - V_eff[..., None] * xHD[..., 7:8] - V_eff[..., None] * yHD[..., 7:8]),
++        (V_eff[..., None] * xHD[..., 7:14] + V_eff[..., None] * yHD[..., 9:16]
++         - V_eff[..., None] * xHD[..., 8:15] - V_eff[..., None] * yHD[..., 8:15]),
++        (V_eff[..., None] * xHD[..., 14:15] - V_eff[..., None] * yHD[..., 15:16]),
++    ], axis=-1) / M[None, :]
++
++    return jnp.concatenate([d_H2, d_HD], axis=-1)
++
++
++def _observables(y, p):
++    xH2 = y[..., :N]
++    xHD = y[..., N:]
++    xT2 = 1.0 - xH2 - xHD
++    dp_tray, P_top = p[..., 2], p[..., 3]
++    P_stage = P_top[..., None] + _KN * dp_tray[..., None]
++    T = _solve_T(xH2, xHD, P_stage)
++    obs = jnp.stack([
++        xH2[..., 0],
++        xT2[..., N - 1],
++        T[..., 0],
++        T[..., N - 1],
++        jnp.sum(M * xH2, axis=-1),
++        jnp.sum(M * xHD, axis=-1),
++        jnp.sum(M * xT2, axis=-1),
++    ], axis=-1)
++    return obs
++
++
++_N_STEPS = 2000
++
++
++def _solve_batch(y0, p):
++    dt = 25.0 / _N_STEPS
++
++    def step(y, i):
++        t = i * dt
++        k1 = _rhs(t, y, p)
++        k2 = _rhs(t + 0.5 * dt, y + 0.5 * dt * k1, p)
++        k3 = _rhs(t + 0.5 * dt, y + 0.5 * dt * k2, p)
++        k4 = _rhs(t + dt, y + dt * k3, p)
++        y = y + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
++        return y, None
++
++    yT, _ = lax.scan(step, y0, jnp.arange(_N_STEPS))
++    return _observables(yT, p)
++
++
++def forward_ensemble(y0_batch, p_batch):
++    y0 = jnp.asarray(y0_batch, dtype=jnp.float64)
++    p = jnp.asarray(p_batch, dtype=jnp.float64)
++    y0b, pb = jnp.atleast_2d(y0), jnp.atleast_2d(p)
++    if y0b.ndim == 1:
++        y0b = y0b[None, :]
++    if pb.ndim == 1:
++        pb = pb[None, :]
++    return jax.jit(_solve_batch)(y0b, pb)
++
++
++def differentiable_closure(y0_batch, p_ref_batch):
++    y0 = jnp.asarray(y0_batch, dtype=jnp.float64)
++    p_ref = jnp.asarray(p_ref_batch, dtype=jnp.float64)
++
++    def f(p_jax):
++        p = jnp.asarray(p_jax, dtype=jnp.float64)
++        return _solve_batch(y0, p)
++
++    return f

@@ -1,0 +1,169 @@
+"""Deliverable JAX GPU ensemble solver for CryoHDTColumn16.
+"""
+
+from __future__ import annotations
+
+import os
+os.environ.setdefault("JAX_ENABLE_X64", "1")
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+jax.config.update("jax_enable_x64", True)
+
+_M = jnp.array([4.0] + [1.0]*14 + [6.0], dtype=jnp.float64)
+_A = jnp.array([9.45, 9.62, 9.85], dtype=jnp.float64)
+_B = jnp.array([106.0, 129.0, 156.0], dtype=jnp.float64)
+_V_FLOOD = 2.15
+_STAGE = jnp.arange(16, dtype=jnp.float64)
+
+
+@jax.custom_jvp
+def _bubble_solve(xH2, xHD, P):
+    """Solve sum_s x_s * Psat_s(T) = P for T.  Monotonic increasing in T."""
+    xT2 = 1.0 - xH2 - xHD
+    T = jnp.float64(12.0)
+    def body(T, _):
+        eH2 = jnp.exp(_A[0] - _B[0]/(T + 1.8))
+        eHD = jnp.exp(_A[1] - _B[1]/(T + 1.8))
+        eT2 = jnp.exp(_A[2] - _B[2]/(T + 1.8))
+        r = xH2*eH2 + xHD*eHD + xT2*eT2 - P
+        gT = xH2*eH2*_B[0]/(T + 1.8)**2 + xHD*eHD*_B[1]/(T + 1.8)**2 + xT2*eT2*_B[2]/(T + 1.8)**2
+        return T - r/gT, None
+    T, _ = jax.lax.scan(body, T, None, length=12)
+    return T
+
+
+@_bubble_solve.defjvp
+def _bubble_solve_jvp(primals, tangents):
+    xH2, xHD, P = primals
+    dxH2, dxHD, dP = tangents
+    T = _bubble_solve(xH2, xHD, P)
+    xT2 = 1.0 - xH2 - xHD
+    eH2 = jnp.exp(_A[0] - _B[0]/(T + 1.8))
+    eHD = jnp.exp(_A[1] - _B[1]/(T + 1.8))
+    eT2 = jnp.exp(_A[2] - _B[2]/(T + 1.8))
+    gT = xH2*eH2*_B[0]/(T + 1.8)**2 + xHD*eHD*_B[1]/(T + 1.8)**2 + xT2*eT2*_B[2]/(T + 1.8)**2
+    gxH2 = eH2 - eT2
+    gxHD = eHD - eT2
+    dT = (dP - gxH2*dxH2 - gxHD*dxHD)/gT
+    return T, dT
+
+
+def _col_rhs(t, y, p):
+    V_boil, d_rec_frac, dp_tray, P_top = p
+    V_eff = V_boil*(1.0 + 0.08*jnp.sin(0.25*t))
+    eta = jnp.where(V_eff <= _V_FLOOD, 0.92, 0.92/(1.0 + 1.8*(V_eff - _V_FLOOD)**2))
+    D_rec = d_rec_frac*V_eff
+    L_rect = V_eff - D_rec
+
+    xH2 = y[:16]
+    xHD = y[16:]
+    xT2 = 1.0 - xH2 - xHD
+    P_st = P_top + _STAGE*dp_tray
+
+    Ts = jax.vmap(_bubble_solve)(xH2, xHD, P_st)
+
+    eH2 = jnp.exp(_A[0] - _B[0]/(Ts + 1.8))
+    eHD = jnp.exp(_A[1] - _B[1]/(Ts + 1.8))
+    eT2 = jnp.exp(_A[2] - _B[2]/(Ts + 1.8))
+
+    yH2 = (1.0 - eta)*xH2 + eta*xH2*eH2/P_st
+    yHD = (1.0 - eta)*xHD + eta*xHD*eHD/P_st
+
+    # stage flow derivatives (i is 0-based stage index)
+    up_xH2 = jnp.roll(xH2, 1); up_xH2 = up_xH2.at[0].set(0.0)
+    up_xHD = jnp.roll(xHD, 1); up_xHD = up_xHD.at[0].set(0.0)
+    dn_yH2 = jnp.roll(yH2, -1); dn_yH2 = dn_yH2.at[15].set(0.0)
+    dn_yHD = jnp.roll(yHD, -1); dn_yHD = dn_yHD.at[15].set(0.0)
+
+    dxH = jnp.where(
+        jnp.arange(16) == 0,
+        V_eff*yH2[1] - V_eff*xH2[0],
+        jnp.where(
+            jnp.arange(16) < 7,
+            L_rect*up_xH2 + V_eff*dn_yH2 - L_rect*xH2 - V_eff*yH2,
+            jnp.where(
+                jnp.arange(16) == 7,
+                L_rect*xH2[6] + D_rec*xH2[0] + V_eff*yH2[8] - V_eff*xH2[7] - V_eff*yH2[7],
+                jnp.where(
+                    jnp.arange(16) < 15,
+                    V_eff*up_xH2 + V_eff*dn_yH2 - V_eff*xH2 - V_eff*yH2,
+                    V_eff*xH2[14] - V_eff*yH2[15],
+                ),
+            ),
+        ),
+    )/_M
+    dxHD = jnp.where(
+        jnp.arange(16) == 0,
+        V_eff*yHD[1] - V_eff*xHD[0],
+        jnp.where(
+            jnp.arange(16) < 7,
+            L_rect*up_xHD + V_eff*dn_yHD - L_rect*xHD - V_eff*yHD,
+            jnp.where(
+                jnp.arange(16) == 7,
+                L_rect*xHD[6] + D_rec*xHD[0] + V_eff*yHD[8] - V_eff*xHD[7] - V_eff*yHD[7],
+                jnp.where(
+                    jnp.arange(16) < 15,
+                    V_eff*up_xHD + V_eff*dn_yHD - V_eff*xHD - V_eff*yHD,
+                    V_eff*xHD[14] - V_eff*yHD[15],
+                ),
+            ),
+        ),
+    )/_M
+    return jnp.concatenate([dxH, dxHD])
+
+
+def _obs_from_final(y_final, p):
+    xH2 = y_final[:16]
+    xHD = y_final[16:]
+    xT2 = 1.0 - xH2 - xHD
+    P_st = p[3] + _STAGE*p[2]
+    Ts = jax.vmap(_bubble_solve)(xH2, xHD, P_st)
+    tot_H2 = jnp.sum(_M*xH2)
+    tot_HD = jnp.sum(_M*xHD)
+    tot_T2 = jnp.sum(_M*xT2)
+    return jnp.stack([xH2[0], xT2[15], Ts[0], Ts[15], tot_H2, tot_HD, tot_T2])
+
+
+def forward_ensemble(y0_batch, p_batch):
+    y0_batch = jnp.asarray(y0_batch, dtype=jnp.float64)
+    p_batch = jnp.asarray(p_batch, dtype=jnp.float64)
+    import diffrax as dfx
+    term = dfx.ODETerm(_col_rhs)
+    solver = dfx.Kvaerno5()
+    controller = dfx.PIDController(rtol=1e-10, atol=1e-12)
+    saveat = dfx.SaveAt(t1=True)
+
+    def solve_one(y0i, pi):
+        sol = dfx.diffeqsolve(term, solver, 0.0, 25.0, None, y0i, args=pi,
+                              stepsize_controller=controller, saveat=saveat,
+                              max_steps=100000, throw=False)
+        return sol.ys[0]
+
+    y_final = jax.vmap(solve_one)(y0_batch, p_batch)
+    return jax.vmap(_obs_from_final)(y_final, p_batch)
+
+
+def differentiable_closure(y0_batch, p_ref_batch):
+    y0_batch = jnp.asarray(y0_batch, dtype=jnp.float64)
+    p_ref_batch = jnp.asarray(p_ref_batch, dtype=jnp.float64)
+
+    def _solve(p):
+        import diffrax as dfx
+        term = dfx.ODETerm(_col_rhs)
+        solver = dfx.Kvaerno5()
+        controller = dfx.PIDController(rtol=1e-10, atol=1e-12)
+        saveat = dfx.SaveAt(t1=True)
+
+        def solve_one(y0i, pi):
+            sol = dfx.diffeqsolve(term, solver, 0.0, 25.0, None, y0i, args=pi,
+                                  stepsize_controller=controller, saveat=saveat,
+                                  max_steps=100000, throw=False)
+            return sol.ys[0]
+
+        y_final = jax.vmap(solve_one)(y0_batch, p)
+        return jax.vmap(_obs_from_final)(y_final, p)
+
+    return _solve

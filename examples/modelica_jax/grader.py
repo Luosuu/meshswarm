@@ -6,11 +6,11 @@ in an isolated subprocess (or through a sandboxed GPU `ShellRunner`).
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import csv
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -28,10 +28,60 @@ from tasks import DELIVERABLE, HERE, STAGE_HOLDUPS_16, TASKS, THRESHOLDS_S, Benc
 
 EVAL_WORKER_PY = HERE / "eval_worker.py"
 
-FORBIDDEN = re.compile(
-    r"\bsubprocess\b|\bos\.system\b|\bos\.popen\b|\bpty\b|\bshutil\.which\b|"
-    r"\bomc\b|\.mesh\b|\bstop_gradient\b|jax_enable_x64[^\n]*False",
-)
+_BANNED_MODULES = {"subprocess", "pty", "ctypes", "cffi", "socket"}
+_BANNED_ATTRS = {"system", "popen", "posix_spawn", "posix_spawnp", "stop_gradient", "execv", "execve", "execvp"}
+
+
+def forbidden_construct(code: str) -> str | None:
+    """AST-based static check: blocks banned imports/calls/literals while ignoring comments & docstrings."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        return f"syntax error at line {exc.lineno}: {exc.msg}"
+
+    # Collect docstring Constant nodes so prose comments like "matches omc reference" are never penalized.
+    doc_nodes: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                doc_nodes.add(id(first.value))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if top in _BANNED_MODULES:
+                    return alias.name
+        elif isinstance(node, ast.ImportFrom):
+            top = (node.module or "").split(".")[0]
+            if top in _BANNED_MODULES:
+                return node.module or top
+            for alias in node.names:
+                if alias.name in _BANNED_ATTRS or alias.name in _BANNED_MODULES:
+                    return alias.name
+        elif isinstance(node, ast.Attribute) and node.attr in _BANNED_ATTRS:
+            return node.attr
+        elif isinstance(node, ast.Name) and node.id == "stop_gradient":
+            return node.id
+        elif isinstance(node, ast.Call):
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "update"
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "jax_enable_x64"
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value is False
+            ):
+                return "jax_enable_x64=False"
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in doc_nodes:
+            val = node.value
+            if ".mesh" in val:
+                return ".mesh"
+            if val.strip() == "omc" or val.strip().startswith("omc "):
+                return "omc"
+    return None
 
 
 def score_of(combined_seconds: float) -> float:
@@ -130,9 +180,9 @@ def make_grader(
             return Grade(0.0, f"no {DELIVERABLE} in the workspace")
 
         code = cand.read_text(encoding="utf-8", errors="replace")
-        bad = FORBIDDEN.search(code)
+        bad = forbidden_construct(code)
         if bad:
-            return Grade(0.0, f"forbidden construct `{bad.group(0)}` in {DELIVERABLE}")
+            return Grade(0.0, f"forbidden construct `{bad}` in {DELIVERABLE}")
 
         if "gold" not in cached_gold:
             if gold_override is not None:
