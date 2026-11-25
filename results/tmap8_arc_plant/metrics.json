@@ -1,0 +1,96 @@
+{
+  "container_tag": "idaholab/tmap8:2026.05.10-0cdef71",
+  "tmap8_version": "snapshot-20-10-27-53529-g9fb74b436d",
+  "fuel_cycle_sha256": "b30426042d7c102397510c074f1c5454e18bd89d947c67ea0a3b1aaa31b2b0e6",
+  "cluster": "UVA Rivanna (Apptainer 1.4.5 --nv --containall --no-home --net --network none)",
+  "selftest_job_id": "23418030",
+  "evolve_job_ids": ["23418230", "23429870", "23430931"],
+  "total_swarms_evaluated": 17,
+  "total_campaign_cost_usd": 3.92,
+  "benchmarks": {
+    "inl_meschini_baseline": {
+      "passed": false,
+      "score": 0.0,
+      "initial_inventory_kg": 1.14,
+      "p_net_elec_mwe": 120.47,
+      "j_econ_mwe": 97.69,
+      "nominal_max_inproc_g": 462.7,
+      "nominal_max_hx_mg": 310.4,
+      "tes_fouling_max_hx_mg": 537.0,
+      "tbe_drop_min_sto_kg": 0.6012,
+      "tbe_drop_req_reserve_kg": 0.6208,
+      "nominal_t_double_yr": 1.409,
+      "total_violations": 14
+    },
+    "naive_corner_design": {
+      "passed": false,
+      "score": 0.0,
+      "initial_inventory_kg": 0.3,
+      "p_net_elec_mwe": -35.19,
+      "j_econ_mwe": -43.81,
+      "total_violations": 6
+    },
+    "meshevolve_gen2_swarm_winner": {
+      "passed": true,
+      "score": 2.705,
+      "cost_usd": 0.2317,
+      "initial_inventory_kg": 1.0,
+      "p_net_elec_mwe": 99.5,
+      "j_econ_mwe": 80.11,
+      "nominal_max_inproc_g": 163.2,
+      "nominal_max_hx_mg": 18.0,
+      "tes_fouling_max_hx_mg": 97.05,
+      "heldout_jitter_max_hx_mg": 52.62,
+      "nominal_t_double_yr": 0.558,
+      "tmap8_wall_s": 86.2
+    },
+    "conservative_hand_tuned": {
+      "passed": true,
+      "score": 4.453,
+      "initial_inventory_kg": 0.86,
+      "p_net_elec_mwe": 101.91,
+      "j_econ_mwe": 85.36,
+      "nominal_max_inproc_g": 164.1,
+      "nominal_max_hx_mg": 17.0,
+      "nominal_t_double_yr": 0.71,
+      "tmap8_wall_s": 47.2
+    },
+    "meshevolve_gen6_swarm_champion": {
+      "passed": true,
+      "score": 4.507,
+      "cost_usd": 0.468,
+      "initial_inventory_kg": 0.8252,
+      "p_net_elec_mwe": 101.45,
+      "j_econ_mwe": 85.52,
+      "nominal_max_inproc_g": 163.3,
+      "nominal_max_hx_mg": 12.63,
+      "tes_fouling_max_hx_mg": 77.07,
+      "heldout_jitter_max_hx_mg": 41.05,
+      "nominal_t_double_yr": 0.516,
+      "tmap8_wall_s": 139.6
+    },
+    "gpu_jax_differentiable_reference": {
+      "passed": true,
+      "score": 8.221,
+      "gpu_trajectories_evaluated": 115456,
+      "gpu_wall_s": 24.4286,
+      "cpu_equivalent_days": 44.1,
+      "speedup_vs_cpu_tmap8": 156000,
+      "initial_inventory_kg": 0.889,
+      "p_net_elec_mwe": 113.76,
+      "j_econ_mwe": 96.66,
+      "nominal_max_inproc_g": 187.5,
+      "nominal_max_hx_mg": 14.5,
+      "nominal_t_double_yr": 0.75,
+      "tmap8_wall_s": 47.8
+    }
+  },
+  "lineage_progression": [
+    {"gen": 1, "peak_lesson_score": 0.0, "control_score": 0.0, "key_event": "Built accurate BE twins (~1e-4), missed deliverable write due to analysis paralysis"},
+    {"gen": 2, "peak_lesson_score": 2.705, "control_score": 0.0, "key_event": "Reviewer enforced early incumbent write; run-1 passed all 5 TMAP8 scenarios (80.11 MWe)"},
+    {"gen": 3, "peak_lesson_score": 0.0, "control_score": 0.0, "key_event": "Diagnosed 3-swarm single-GPU lock contention + single-writer handoff bottleneck"},
+    {"gen": 4, "peak_lesson_score": 0.0, "control_score": 0.0, "key_event": "Switched to per-workspace locks (5x throughput); 18m clock too tight for handoff"},
+    {"gen": 5, "peak_lesson_score": 0.0, "control_score": 0.0, "key_event": "Reviewer coined 'Break the write monopoly: finder writes immediately'"},
+    {"gen": 6, "peak_lesson_score": 4.507, "control_score": 0.0, "key_event": "Penalized L-BFGS-B + finder-writes reached 85.52 MWe (I0=0.825 kg, HX=12.6 mg), beating human baseline (4.453)"}
+  ]
+}

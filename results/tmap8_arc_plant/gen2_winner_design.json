@@ -1,0 +1,17 @@
+{
+  "initial_inventory": 1.0,
+  "resident_time_BB": 4500.0,
+  "resident_time_TES": 65000.0,
+  "eta_2": 0.95,
+  "resident_time_HX": 420.0,
+  "resident_time_DS": 3600.0,
+  "resident_time_vacuum": 600.0,
+  "f_DIR": 0.4,
+  "resident_time_FCU": 585.0,
+  "resident_time_ISS": 6000.0,
+  "f_ISS_to_DS": 0.1,
+  "resident_time_membrane": 100.0,
+  "TBR_value": 1.1,
+  "AF_value": 0.82,
+  "eta_f": 0.36
+}
