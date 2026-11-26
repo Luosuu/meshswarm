@@ -2,11 +2,12 @@
   "container_tag": "idaholab/tmap8:2026.05.10-0cdef71",
   "tmap8_version": "snapshot-20-10-27-53529-g9fb74b436d",
   "fuel_cycle_sha256": "b30426042d7c102397510c074f1c5454e18bd89d947c67ea0a3b1aaa31b2b0e6",
-  "cluster": "UVA Rivanna (Apptainer 1.4.5 --nv --containall --no-home --net --network none)",
+  "cluster": "UVA Rivanna (NVIDIA A40 & RTX 3090 GPUs, Apptainer 1.4.5 --nv --containall --no-home --net --network none)",
   "selftest_job_id": "23418030",
-  "evolve_job_ids": ["23418230", "23429870", "23430931"],
-  "total_swarms_evaluated": 17,
-  "total_campaign_cost_usd": 3.92,
+  "evolve_job_ids": ["23418230", "23429870", "23430931", "23438944"],
+  "total_swarms_evaluated": 23,
+  "uninstructed_controls_zero_rate": "9/9 (100% scored 0.0/10)",
+  "total_campaign_cost_usd": 5.33,
   "benchmarks": {
     "inl_meschini_baseline": {
       "passed": false,
@@ -55,7 +56,7 @@
       "nominal_t_double_yr": 0.71,
       "tmap8_wall_s": 47.2
     },
-    "meshevolve_gen6_swarm_champion": {
+    "meshevolve_gen6_cpu_champion": {
       "passed": true,
       "score": 4.507,
       "cost_usd": 0.468,
@@ -68,6 +69,23 @@
       "heldout_jitter_max_hx_mg": 41.05,
       "nominal_t_double_yr": 0.516,
       "tmap8_wall_s": 139.6
+    },
+    "meshevolve_gen8_gpu_champion": {
+      "passed": true,
+      "score": 6.948,
+      "cost_usd": 0.2513,
+      "initial_inventory_kg": 0.79,
+      "p_net_elec_mwe": 108.13,
+      "j_econ_mwe": 92.84,
+      "nominal_max_inproc_g": 194.3,
+      "tbe_drop_max_inproc_g": 219.95,
+      "nominal_max_hx_mg": 20.16,
+      "tes_fouling_max_hx_mg": 93.88,
+      "heldout_jitter_max_hx_mg": 52.14,
+      "nominal_t_double_yr": 0.663,
+      "handovers": 2,
+      "delegations": 1,
+      "tmap8_wall_s": 118.9
     },
     "gpu_jax_differentiable_reference": {
       "passed": true,
@@ -91,6 +109,8 @@
     {"gen": 3, "peak_lesson_score": 0.0, "control_score": 0.0, "key_event": "Diagnosed 3-swarm single-GPU lock contention + single-writer handoff bottleneck"},
     {"gen": 4, "peak_lesson_score": 0.0, "control_score": 0.0, "key_event": "Switched to per-workspace locks (5x throughput); 18m clock too tight for handoff"},
     {"gen": 5, "peak_lesson_score": 0.0, "control_score": 0.0, "key_event": "Reviewer coined 'Break the write monopoly: finder writes immediately'"},
-    {"gen": 6, "peak_lesson_score": 4.507, "control_score": 0.0, "key_event": "Penalized L-BFGS-B + finder-writes reached 85.52 MWe (I0=0.825 kg, HX=12.6 mg), beating human baseline (4.453)"}
+    {"gen": 6, "peak_lesson_score": 4.507, "control_score": 0.0, "key_event": "CPU L-BFGS-B + finder-writes reached 85.52 MWe (I0=0.825 kg), beating human baseline (4.453)"},
+    {"gen": 7, "peak_lesson_score": 0.0, "control_score": 0.0, "key_event": "Migrated to RTX 3090 GPU; Reviewer added 'Every verification must end in promote + start coarse probe immediately'"},
+    {"gen": 8, "peak_lesson_score": 6.948, "control_score": 0.0, "key_event": "GPU twin in 3 min + sub-agent seed probe + two promotes (40% & 90% clock) reached 92.84 MWe (108.13 MWe net, I0=0.790 kg) for $0.25"}
   ]
 }

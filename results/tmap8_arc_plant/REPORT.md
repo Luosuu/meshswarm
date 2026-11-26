@@ -14,23 +14,20 @@ In INL's official documentation (`fuel_cycle_Abdou/index.md` & `fuel_cycle_Mesch
 3. **Off-Normal Storage Depletion Breach**: Under a 20% plasma burn efficiency excursion (`tbe_drop`), `T_10_storage` drops to **`0.6012 kg`**, breaching the 24-hour outage reserve requirement.
 4. **Excessive Scarce Startup Tritium**: Requires **`1.14 kg`** of scarce CANDU tritium (`> 1.00 kg` budget).
 
-## 3. Verified Results on UVA Rivanna (17 Swarms Across 6 Generations, `$3.92` Total Cost)
+## 3. Verified Results on UVA Rivanna (23 Swarms Across 8 Generations, `$5.33` Total Cost)
 
 ### 3.1 GPU Differentiable Digital Twin vs CPU `tmap8-opt` (`--selftest`, Job `23418030`)
 - Single-scenario CPU `tmap8-opt` runtime (with native `gcc-toolset-13` + `OpenMPI` FParser C++ JIT): **`~33–48 s`** per trajectory (**`44.1 days`** CPU time for `115,456` trajectories).
 - **GPU JAX Differentiable Backward-Euler Twin (`reference_jax_optimizer.py`)**: Evaluated **`115,456` 3-year pulsed trajectories + exact 15D gradients in `24.43 s`** on a single `NVIDIA A40` GPU (**`~156,000×` speedup**), achieving **`8.221 / 10`** (`J_econ = 96.66 MWe`, `P_net = 113.76 MWe`, `I_0 = 0.889 kg`, `HX_max = 14.5 mg`, `t_double = 0.75 yr`) across all 5 untouched `tmap8-opt` scenarios.
 
-### 3.2 `meshevolve` 6-Generation Lineage Progression (`Jobs 23418230, 23429870, 23430931`)
-- **All 7 uninstructed runs (`Gen 1` × 2 + `Gen 2–6` no-lesson `control` × 5) scored `0.0 / 10`**: Without evolutionary organizational lessons, swarms repeatedly fell into analysis paralysis, built 3 competing duplicate twins, clobbered shared files, or stalled in population-based `differential_evolution` without ever committing a passing design to `plant_design.json`.
-- **Generation 2 Breakthrough (`gen-02/run-1`, `$0.23`, `2.705 / 10`)**: Guided by Gen 1's Reviewer lesson (*"write an early gated candidate in the first third of the budget"*), `run-1` passed all 5 `tmap8-opt` scenarios (`J_econ = 80.11 MWe`, `P_net = 99.50 MWe`, `I_0 = 1.000 kg`, `inproc_max = 163.2 g`, `tes_fouling HX = 97.05 mg <= 100.0 mg`).
-- **Generation 3–5 Organizational Diagnosis (*"Break the Write Monopoly"*)**:
-  - Fixing `ShellRunner` from shared `gpu:0` locking to per-workspace locking (`--gpus ""`) boosted swarm throughput **>5×**, revealing a second organizational bottleneck: Gen 4's *"single designated file owner"* rule caused passing candidates (`agent2_best.json` at `I_0 = 0.800 kg`) to stall at handoff.
-  - Gen 5's Reviewer autonomously coined the fix: **"Break the write monopoly: whoever holds a gate-passing candidate writes the deliverable immediately."**
-- **Generation 6 Champion (`arc_gen6_showdown/gen-01/run-1`, `$0.47`, `4.507 / 10` — Surpassing Human Expert Baseline!)**:
-  - Combining penalized `L-BFGS-B` local gradient search with the *"finder-writes"* protocol, `run-1` wrote a verified design mid-run (`t ~ 950s`) that **passed all 5 untouched `tmap8-opt` scenarios (`12,470` MOOSE steps, zero violations)** and **beat our human hand-tuned conservative baseline (`4.453 / 10`, `85.36 MWe`)**:
-    - **Levelized Net Economic Output (`J_econ`)**: **`85.52 MWe`** (`P_net_elec = 101.45 MWe`, `AF = 85.83%`)
-    - **Scarce Startup Tritium (`I_0`)**: **`0.825 kg`** (**`-27.6%`** vs INL `1.140 kg` — lower than both the human baseline `0.860 kg` and GPU reference `0.889 kg`!)
-    - **Peak HX Boiler Tritium**: **`12.63 mg`** nominal (**`-95.9%`** vs INL `310.4 mg`; `77.07 mg` under `tes_fouling`; `41.05 mg` under unseen `heldout_combined_jitter`)
-    - **Peak Active Tritium**: **`163.3 g`** (**`-64.7%`** vs INL `462.7 g`)
-    - **Tritium Doubling Time**: **`0.516 yr`** (`6.2 months` — **`2.73×` faster** than INL `1.41 yr`)
-  - Non-intuitive co-design trade-off discovered autonomously by `run-1`: **slowing** `FLiBe` blanket circulation (`resident_time_BB` `4,500 s -> 12,633 s`) saved **`2.02 MWe`** of MHD pumping power at negligible active-inventory cost, funding high-efficiency `TES` (`eta_2 = 95.7%`), fast `ISS` (`2,918 s`), and `77.1%` Direct Internal Recycling (`f_DIR`).
+### 3.2 `meshevolve` 8-Generation Lineage Staircase (`0.0 -> 2.705 -> 4.507 -> 6.948 / 10`)
+- **All 9 uninstructed runs (`Gen 1` × 2 + `Gen 2–8` no-lesson `control` × 7) scored `0.0 / 10`**: Without evolutionary organizational lessons, every single uninstructed swarm (`9/9`) fell into analysis paralysis, duplicate twin sprawl, or slow population search without committing a passing design to `plant_design.json`.
+- **Generation 2 (`2.705 / 10`, `$0.23`)**: Guided by Gen 1's Reviewer lesson (*"write an early gated candidate in the first third of the budget"*), `run-1` passed all 5 `tmap8-opt` scenarios (`J_econ = 80.11 MWe`, `P_net = 99.50 MWe`, `I_0 = 1.000 kg`).
+- **Generation 6 on CPU (`4.507 / 10`, `$0.47` — Surpassing Human Baseline)**: Following Gen 5 Reviewer's *"Break the write monopoly: whoever holds a gate-passing candidate writes immediately"* rule (on a CPU-only `interactive` node), `run-1` reached `J_econ = 85.52 MWe` (`I_0 = 0.825 kg`, `HX = 12.63 mg`), beating our human hand-tuned conservative baseline (`4.453 / 10`, `85.36 MWe`).
+- **Generation 8 on CUDA GPU (`6.948 / 10`, `$0.25` on `NVIDIA GeForce RTX 3090`, Job `23438944` — Closing the Gap to the Reference Frontier!)**:
+  - Note on hardware migration: when moving from CPU-only `interactive` nodes (Gen 4–6) back to `NVIDIA GeForce RTX 3090` (`CudaDevice(id=0)`), the CPU-node hardware note `jax/CUDA broken 3-for-3, plan CPU` was stripped from `lessons.md` so swarms utilized the attached GPU.
+  - Guided by Gen 7's GPU Reviewer rules (*"Every verification task must end in a promote decision; launch a coarse seed probe immediately after calibration; delegate scoped probes"*), `gen-02/run-1` calibrated its twin in **~3 minutes**, used **1 scoped `delegate()` sub-agent + 2 clean task handovers**, and **promoted twice** (`~40%` and `~90%` of clock) to achieve **`6.948 / 10` for `$0.25`**:
+    - **Levelized Net Economic Output (`J_econ`)**: **`92.84 MWe`** (`P_net_elec = 108.13 MWe`, closing **65% of the remaining gap** between Gen 6 `85.52 MWe` and our 64-start GPU JAX reference `96.66 MWe`!)
+    - **Scarce Startup Tritium (`I_0`)**: **`0.790 kg`** (**`-30.7%`** vs INL `1.140 kg` — **the lowest startup tritium of any passing design**, beating both the human baseline `0.860 kg` and the GPU reference `0.889 kg` by `99 g`!)
+    - **Tight Boundary Packing Across All 5 Untouched `tmap8-opt` Scenarios**: Packed `tbe_drop` active tritium to **`219.95 g <= 220.00 g`** (within `50 mg` of the DOE cap!) and `tes_fouling` HX boiler tritium to **`93.88 mg <= 100.00 mg`**, while still passing the unseen `heldout_combined_jitter` exam with ample margin (`200.91 g <= 230.00 g`, `52.14 mg <= 110.00 mg`)!
+    - **Parasitic Tritium Plant Power**: Cut to **`7.39 MWe`** (vs `11.33 MWe` in Gen 6) by combining `f_DIR = 0.88` with slow `FLiBe` blanket circulation (`11,113 s`, `p_pumps = 5.73 MWe`).
